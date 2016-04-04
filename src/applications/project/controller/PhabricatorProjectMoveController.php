@@ -181,7 +181,7 @@ final class PhabricatorProjectMoveController
     }
 
     $xactions = array();
-    if ($pri !== null) {
+    if (false && $pri !== null) {
       $xactions[] = id(new ManiphestTransaction())
         ->setTransactionType(ManiphestTransaction::TYPE_PRIORITY)
         ->setNewValue($pri);
