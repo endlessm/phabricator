@@ -3,6 +3,7 @@
 /**
  * @task uri        Repository URI Management
  * @task autoclose  Autoclose
+ * @task sync       Cluster Synchronization
  */
 final class PhabricatorRepository extends PhabricatorRepositoryDAO
   implements
@@ -62,6 +63,9 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
   private $mostRecentCommit = self::ATTACHABLE;
   private $projectPHIDs = self::ATTACHABLE;
 
+  private $clusterWriteLock;
+  private $clusterWriteVersion;
+
   public static function initializeNewRepository(PhabricatorUser $actor) {
     $app = id(new PhabricatorApplicationQuery())
       ->setViewer($actor)
@@ -93,7 +97,7 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
       ),
       self::CONFIG_COLUMN_SCHEMA => array(
         'name' => 'sort255',
-        'callsign' => 'sort32',
+        'callsign' => 'sort32?',
         'repositorySlug' => 'sort64?',
         'versionControlSystem' => 'text32',
         'uuid' => 'text64?',
@@ -149,13 +153,21 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
   }
 
   public function getMonogram() {
-    return 'r'.$this->getCallsign();
+    $callsign = $this->getCallsign();
+    if (strlen($callsign)) {
+      return "r{$callsign}";
+    }
+
+    $id = $this->getID();
+    return "R{$id}";
   }
 
   public function getDisplayName() {
-    // TODO: This is intended to produce a human-readable name that is not
-    // necessarily a global, unique identifier. Eventually, it may just return
-    // a string like "skynet" instead of "rSKYNET".
+    $slug = $this->getRepositorySlug();
+    if (strlen($slug)) {
+      return $slug;
+    }
+
     return $this->getMonogram();
   }
 
@@ -317,14 +329,14 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
 
   public static function isValidRepositorySlug($slug) {
     try {
-      self::asssertValidRepositorySlug($slug);
+      self::assertValidRepositorySlug($slug);
       return true;
     } catch (Exception $ex) {
       return false;
     }
   }
 
-  public static function asssertValidRepositorySlug($slug) {
+  public static function assertValidRepositorySlug($slug) {
     if (!strlen($slug)) {
       throw new Exception(
         pht(
@@ -388,6 +400,30 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
           'The name "%s" is not a valid repository short name. Repository '.
           'short names may not contain only numbers.',
           $slug));
+    }
+  }
+
+  public static function assertValidCallsign($callsign) {
+    if (!strlen($callsign)) {
+      throw new Exception(
+        pht(
+          'A repository callsign must be at least one character long.'));
+    }
+
+    if (strlen($callsign) > 32) {
+      throw new Exception(
+        pht(
+          'The callsign "%s" is not a valid repository callsign. Callsigns '.
+          'must be no more than 32 bytes long.',
+          $callsign));
+    }
+
+    if (!preg_match('/^[A-Z]+\z/', $callsign)) {
+      throw new Exception(
+        pht(
+          'The callsign "%s" is not a valid repository callsign. Callsigns '.
+          'may only contain UPPERCASE letters.',
+          $callsign));
     }
   }
 
@@ -675,7 +711,13 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
   }
 
   public function getURI() {
-    return '/diffusion/'.$this->getCallsign().'/';
+    $callsign = $this->getCallsign();
+    if (strlen($callsign)) {
+      return "/diffusion/{$callsign}/";
+    }
+
+    $id = $this->getID();
+    return "/diffusion/{$id}/";
   }
 
   public function getPathURI($path) {
@@ -684,7 +726,96 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
 
   public function getCommitURI($identifier) {
     $callsign = $this->getCallsign();
-    return "/r{$callsign}{$identifier}";
+    if (strlen($callsign)) {
+      return "/r{$callsign}{$identifier}";
+    }
+
+    $id = $this->getID();
+    return "/R{$id}:{$identifier}";
+  }
+
+  public static function parseRepositoryServicePath($request_path) {
+    // NOTE: In Mercurial over SSH, the path will begin without a leading "/",
+    // so we're matching it optionally.
+
+    $patterns = array(
+      '(^'.
+        '(?P<base>/?diffusion/(?P<identifier>[A-Z]+|[0-9]\d*))'.
+        '(?P<path>(?:/.*)?)'.
+      '\z)',
+    );
+
+    $identifier = null;
+    foreach ($patterns as $pattern) {
+      $matches = null;
+      if (!preg_match($pattern, $request_path, $matches)) {
+        continue;
+      }
+
+      $identifier = $matches['identifier'];
+      $base = $matches['base'];
+      $path = $matches['path'];
+      break;
+    }
+
+    if ($identifier === null) {
+      return null;
+    }
+
+    return array(
+      'identifier' => $identifier,
+      'base' => $base,
+      'path' => $path,
+    );
+  }
+
+  public function getCanonicalPath($request_path) {
+    $standard_pattern =
+      '(^'.
+        '(?P<prefix>/diffusion/)'.
+        '(?P<identifier>[^/]+)'.
+        '(?P<suffix>(?:/.*)?)'.
+      '\z)';
+
+    $matches = null;
+    if (preg_match($standard_pattern, $request_path, $matches)) {
+      $prefix = $matches['prefix'];
+
+      $callsign = $this->getCallsign();
+      if ($callsign) {
+        $identifier = $callsign;
+      } else {
+        $identifier = $this->getID();
+      }
+
+      $suffix = $matches['suffix'];
+      if (!strlen($suffix)) {
+        $suffix = '/';
+      }
+
+      return $prefix.$identifier.$suffix;
+    }
+
+    $commit_pattern =
+      '(^'.
+        '(?P<prefix>/)'.
+        '(?P<monogram>'.
+          '(?:'.
+            'r(?P<repositoryCallsign>[A-Z]+)'.
+            '|'.
+            'R(?P<repositoryID>[1-9]\d*):'.
+          ')'.
+          '(?P<commit>[a-f0-9]+)'.
+        ')'.
+      '\z)';
+
+    $matches = null;
+    if (preg_match($commit_pattern, $request_path, $matches)) {
+      $commit = $matches['commit'];
+      return $this->getCommitURI($commit);
+    }
+
+    return null;
   }
 
   public function generateURI(array $params) {
@@ -955,7 +1086,13 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
     }
 
     if ($need_scope) {
-      $scope = 'r'.$this->getCallsign();
+      $callsign = $this->getCallsign();
+      if ($callsign) {
+        $scope = "r{$callsign}";
+      } else {
+        $id = $this->getID();
+        $scope = "R{$id}:";
+      }
       $name = $scope.$name;
     }
 
@@ -1385,6 +1522,10 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
       return null;
     }
 
+    return $this->getRawHTTPCloneURIObject();
+  }
+
+  private function getRawHTTPCloneURIObject() {
     $uri = PhabricatorEnv::getProductionURI($this->getURI());
     $uri = new PhutilURI($uri);
 
@@ -1686,6 +1827,38 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
     return !$this->isSVN();
   }
 
+  public function canUseGitLFS() {
+    if (!$this->isGit()) {
+      return false;
+    }
+
+    if (!$this->isHosted()) {
+      return false;
+    }
+
+    // TODO: Unprototype this feature.
+    if (!PhabricatorEnv::getEnvConfig('phabricator.show-prototypes')) {
+      return false;
+    }
+
+    return true;
+  }
+
+  public function getGitLFSURI($path = null) {
+    if (!$this->canUseGitLFS()) {
+      throw new Exception(
+        pht(
+          'This repository does not support Git LFS, so Git LFS URIs can '.
+          'not be generated for it.'));
+    }
+
+    $uri = $this->getRawHTTPCloneURIObject();
+    $uri = (string)$uri;
+    $uri = $uri.'/'.$path;
+
+    return $uri;
+  }
+
   public function canMirror() {
     if ($this->isGit() || $this->isHg()) {
       return true;
@@ -1905,6 +2078,7 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
       ->setViewer(PhabricatorUser::getOmnipotentUser())
       ->withPHIDs(array($service_phid))
       ->needBindings(true)
+      ->needProperties(true)
       ->executeOne();
     if (!$service) {
       throw new Exception(
@@ -1913,7 +2087,7 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
           'be loaded.'));
     }
 
-    $service_type = $service->getServiceType();
+    $service_type = $service->getServiceImplementation();
     if (!($service_type instanceof AlmanacClusterRepositoryServiceType)) {
       throw new Exception(
         pht(
@@ -2092,6 +2266,174 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
   }
 
 
+/* -(  Cluster Synchronization  )-------------------------------------------- */
+
+
+  private function shouldEnableSynchronization() {
+    // TODO: This mostly works, but isn't stable enough for production yet.
+    return false;
+
+    $device = AlmanacKeys::getLiveDevice();
+    if (!$device) {
+      return false;
+    }
+
+    return true;
+  }
+
+
+  /**
+   * @task sync
+   */
+  public function synchronizeWorkingCopyBeforeRead() {
+    if (!$this->shouldEnableSynchronization()) {
+      return;
+    }
+
+    $repository_phid = $this->getPHID();
+
+    $device = AlmanacKeys::getLiveDevice();
+    $device_phid = $device->getPHID();
+
+    $read_lock = PhabricatorRepositoryWorkingCopyVersion::getReadLock(
+      $repository_phid,
+      $device_phid);
+
+    // TODO: Raise a more useful exception if we fail to grab this lock.
+    $read_lock->lock(phutil_units('2 minutes in seconds'));
+
+    $versions = PhabricatorRepositoryWorkingCopyVersion::loadVersions(
+      $repository_phid);
+    $versions = mpull($versions, null, 'getDevicePHID');
+
+    $this_version = idx($versions, $device_phid);
+    if ($this_version) {
+      $this_version = (int)$this_version->getRepositoryVersion();
+    } else {
+      $this_version = 0;
+    }
+
+    if ($versions) {
+      $max_version = (int)max(mpull($versions, 'getRepositoryVersion'));
+    } else {
+      $max_version = 0;
+    }
+
+    if ($max_version > $this_version) {
+      $fetchable = array();
+      foreach ($versions as $version) {
+        if ($version->getRepositoryVersion() == $max_version) {
+          $fetchable[] = $version->getDevicePHID();
+        }
+      }
+
+      // TODO: Actualy fetch the newer version from one of the nodes which has
+      // it.
+
+      PhabricatorRepositoryWorkingCopyVersion::updateVersion(
+        $repository_phid,
+        $device_phid,
+        $max_version);
+    }
+
+    $read_lock->unlock();
+
+    return $max_version;
+  }
+
+
+  /**
+   * @task sync
+   */
+  public function synchronizeWorkingCopyBeforeWrite() {
+    if (!$this->shouldEnableSynchronization()) {
+      return;
+    }
+
+    $repository_phid = $this->getPHID();
+
+    $device = AlmanacKeys::getLiveDevice();
+    $device_phid = $device->getPHID();
+
+    $write_lock = PhabricatorRepositoryWorkingCopyVersion::getWriteLock(
+      $repository_phid);
+
+    // TODO: Raise a more useful exception if we fail to grab this lock.
+    $write_lock->lock(phutil_units('2 minutes in seconds'));
+
+    $versions = PhabricatorRepositoryWorkingCopyVersion::loadVersions(
+      $repository_phid);
+    foreach ($versions as $version) {
+      if (!$version->getIsWriting()) {
+        continue;
+      }
+
+      // TODO: This should provide more help so users can resolve the issue.
+      throw new Exception(
+        pht(
+          'An incomplete write was previously performed to this repository; '.
+          'refusing new writes.'));
+    }
+
+    $max_version = $this->synchronizeWorkingCopyBeforeRead();
+
+    PhabricatorRepositoryWorkingCopyVersion::willWrite(
+      $repository_phid,
+      $device_phid);
+
+    $this->clusterWriteVersion = $max_version;
+    $this->clusterWriteLock = $write_lock;
+  }
+
+
+  /**
+   * @task sync
+   */
+  public function synchronizeWorkingCopyAfterWrite() {
+    if (!$this->shouldEnableSynchronization()) {
+      return;
+    }
+
+    if (!$this->clusterWriteLock) {
+      throw new Exception(
+        pht(
+          'Trying to synchronize after write, but not holding a write '.
+          'lock!'));
+    }
+
+    $repository_phid = $this->getPHID();
+
+    $device = AlmanacKeys::getLiveDevice();
+    $device_phid = $device->getPHID();
+
+    // NOTE: This means we're still bumping the version when pushes fail. We
+    // could select only un-rejected events instead to bump a little less
+    // often.
+
+    $new_log = id(new PhabricatorRepositoryPushEventQuery())
+      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->withRepositoryPHIDs(array($repository_phid))
+      ->setLimit(1)
+      ->executeOne();
+
+    $old_version = $this->clusterWriteVersion;
+    if ($new_log) {
+      $new_version = $new_log->getID();
+    } else {
+      $new_version = $old_version;
+    }
+
+    PhabricatorRepositoryWorkingCopyVersion::didWrite(
+      $repository_phid,
+      $device_phid,
+      $this->clusterWriteVersion,
+      $new_log->getID());
+
+    $this->clusterWriteLock->unlock();
+    $this->clusterWriteLock = null;
+  }
+
+
 /* -(  Symbols  )-------------------------------------------------------------*/
 
   public function getSymbolSources() {
@@ -2263,6 +2605,14 @@ final class PhabricatorRepository extends PhabricatorRepositoryDAO
         ->execute();
       foreach ($atoms as $atom) {
         $engine->destroyObject($atom);
+      }
+
+      $lfs_refs = id(new PhabricatorRepositoryGitLFSRefQuery())
+        ->setViewer($engine->getViewer())
+        ->withRepositoryPHIDs(array($phid))
+        ->execute();
+      foreach ($lfs_refs as $ref) {
+        $engine->destroyObject($ref);
       }
 
     $this->saveTransaction();
