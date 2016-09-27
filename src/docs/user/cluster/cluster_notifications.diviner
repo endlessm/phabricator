@@ -1,13 +1,10 @@
 @title Cluster: Notifications
-@group intro
+@group cluster
 
 Configuring Phabricator to use multiple notification servers.
 
 Overview
 ========
-
-WARNING: This feature is a very early prototype; the features this document
-describes are mostly speculative fantasy.
 
 You can run multiple notification servers. The advantages of doing this
 are:

@@ -100,9 +100,10 @@ final class ProjectBoardTaskCard extends Phobject {
       if ($points !== null) {
         $points_tag = id(new PHUITagView())
           ->setType(PHUITagView::TYPE_SHADE)
-          ->setShade(PHUITagView::COLOR_BLUE)
+          ->setShade(PHUITagView::COLOR_GREY)
           ->setSlimShady(true)
-          ->setName($points);
+          ->setName($points)
+          ->addClass('phui-workcard-points');
         $card->addAttribute($points_tag);
       }
     }
@@ -127,6 +128,7 @@ final class ProjectBoardTaskCard extends Phobject {
     }
 
     if ($project_handles) {
+      $project_handles = array_reverse($project_handles);
       $tag_list = id(new PHUIHandleTagListView())
         ->setSlim(true)
         ->setHandles($project_handles);

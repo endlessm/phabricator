@@ -12,7 +12,7 @@ final class PhabricatorAuthRegisterController
     $account_key = $request->getURIData('akey');
 
     if ($request->getUser()->isLoggedIn()) {
-      return $this->renderError(pht('You are already logged in.'));
+      return id(new AphrontRedirectResponse())->setURI('/');
     }
 
     $is_setup = false;
@@ -89,13 +89,14 @@ final class PhabricatorAuthRegisterController
       // user expectation and it's not clear the cases it enables are valuable.
       // See discussion in T3472.
       if (!PhabricatorUserEmail::isAllowedAddress($default_email)) {
+        $debug_email = new PHUIInvisibleCharacterView($default_email);
         return $this->renderError(
           array(
             pht(
               'The account you are attempting to register with has an invalid '.
               'email address (%s). This Phabricator install only allows '.
               'registration with specific email addresses:',
-              $default_email),
+              $debug_email),
             phutil_tag('br'),
             phutil_tag('br'),
             PhabricatorUserEmail::describeAllowedAddresses(),

@@ -351,11 +351,19 @@ final class PhabricatorOwnersPackageQuery
     }
 
     $packages = $this->controlResults;
+    $weak_dominion = PhabricatorOwnersPackage::DOMINION_WEAK;
 
     $matches = array();
     foreach ($packages as $package_id => $package) {
       $best_match = null;
       $include = false;
+
+      // If this package is archived, it's no longer a controlling package
+      // for the given path. In particular, it can not force active packages
+      // with weak dominion to give up control.
+      if ($package->isArchived()) {
+        continue;
+      }
 
       foreach ($package->getPaths() as $package_path) {
         if ($package_path->getRepositoryPHID() != $repository_phid) {
@@ -373,6 +381,7 @@ final class PhabricatorOwnersPackageQuery
       if ($best_match && $include) {
         $matches[$package_id] = array(
           'strength' => $best_match,
+          'weak' => ($package->getDominion() == $weak_dominion),
           'package' => $package,
         );
       }
@@ -380,6 +389,18 @@ final class PhabricatorOwnersPackageQuery
 
     $matches = isort($matches, 'strength');
     $matches = array_reverse($matches);
+
+    $first_id = null;
+    foreach ($matches as $package_id => $match) {
+      if ($first_id === null) {
+        $first_id = $package_id;
+        continue;
+      }
+
+      if ($match['weak']) {
+        unset($matches[$package_id]);
+      }
+    }
 
     return array_values(ipull($matches, 'package'));
   }

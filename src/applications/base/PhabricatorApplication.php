@@ -151,10 +151,6 @@ abstract class PhabricatorApplication
     return $this->getBaseURI().ltrim($path, '/');
   }
 
-  public function getIconURI() {
-    return null;
-  }
-
   public function getIcon() {
     return 'fa-puzzle-piece';
   }
@@ -183,7 +179,8 @@ abstract class PhabricatorApplication
         $item = id(new PHUIListItemView())
           ->setName($article['name'])
           ->setIcon('fa-book')
-          ->setHref($article['href']);
+          ->setHref($article['href'])
+          ->setOpenInNewWindow(true);
 
         $items[] = $item;
       }
@@ -203,7 +200,8 @@ abstract class PhabricatorApplication
         $item = id(new PHUIListItemView())
           ->setName($spec['name'])
           ->setIcon('fa-envelope-o')
-          ->setHref($href);
+          ->setHref($href)
+          ->setOpenInNewWindow(true);
         $items[] = $item;
       }
     }
@@ -331,17 +329,6 @@ abstract class PhabricatorApplication
   public function buildMainMenuExtraNodes(
     PhabricatorUser $viewer,
     PhabricatorController $controller = null) {
-    return array();
-  }
-
-
-  /**
-   * Build items for the "quick create" menu.
-   *
-   * @param   PhabricatorUser         The viewing user.
-   * @return  list<PHUIListItemView>  List of menu items.
-   */
-  public function getQuickCreateItems(PhabricatorUser $viewer) {
     return array();
   }
 
@@ -624,11 +611,11 @@ abstract class PhabricatorApplication
       '(?P<id>[0-9]\d*)/)?'.
       '(?:'.
         '(?:'.
-          '(?P<editAction>parameters|nodefault|nocreate|nomanage|comment)'.
+          '(?P<editAction>parameters|nodefault|nocreate|nomanage|comment)/'.
           '|'.
-          '(?:form/(?P<formKey>[^/]+))'.
+          '(?:form/(?P<formKey>[^/]+)/)?(?:page/(?P<pageKey>[^/]+)/)?'.
         ')'.
-      '/)?';
+      ')?';
   }
 
   protected function getQueryRoutePattern($base = null) {

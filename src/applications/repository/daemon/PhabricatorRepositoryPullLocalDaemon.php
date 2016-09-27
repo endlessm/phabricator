@@ -102,43 +102,58 @@ final class PhabricatorRepositoryPullLocalDaemon
         $retry_after,
         array_keys($pullable));
 
-
       // Figure out which repositories we need to queue for an update.
       foreach ($pullable as $id => $repository) {
-        $monogram = $repository->getMonogram();
+        $now = PhabricatorTime::getNow();
+        $display_name = $repository->getDisplayName();
 
         if (isset($futures[$id])) {
-          $this->log(pht('Repository "%s" is currently updating.', $monogram));
+          $this->log(
+            pht(
+              'Repository "%s" is currently updating.',
+              $display_name));
           continue;
         }
 
         if (isset($queue[$id])) {
-          $this->log(pht('Repository "%s" is already queued.', $monogram));
+          $this->log(
+            pht(
+              'Repository "%s" is already queued.',
+              $display_name));
           continue;
         }
 
-        $after = idx($retry_after, $id, 0);
+        $after = idx($retry_after, $id);
+        if (!$after) {
+          $smart_wait = $repository->loadUpdateInterval($min_sleep);
+          $last_update = $this->loadLastUpdate($repository);
+
+          $after = $last_update + $smart_wait;
+          $retry_after[$id] = $after;
+
+          $this->log(
+            pht(
+              'Scheduling repository "%s" with an update window of %s '.
+              'second(s). Last update was %s second(s) ago.',
+              $display_name,
+              new PhutilNumber($smart_wait),
+              new PhutilNumber($now - $last_update)));
+        }
+
         if ($after > time()) {
           $this->log(
             pht(
               'Repository "%s" is not due for an update for %s second(s).',
-              $monogram,
-              new PhutilNumber($after - time())));
+              $display_name,
+              new PhutilNumber($after - $now)));
           continue;
         }
 
-        if (!$after) {
-          $this->log(
-            pht(
-              'Scheduling repository "%s" for an initial update.',
-              $monogram));
-        } else {
-          $this->log(
-            pht(
-              'Scheduling repository "%s" for an update (%s seconds overdue).',
-              $monogram,
-              new PhutilNumber(time() - $after)));
-        }
+        $this->log(
+          pht(
+            'Scheduling repository "%s" for an update (%s seconds overdue).',
+            $display_name,
+            new PhutilNumber($now - $after)));
 
         $queue[$id] = $after;
       }
@@ -157,8 +172,11 @@ final class PhabricatorRepositoryPullLocalDaemon
             continue;
           }
 
-          $monogram = $repository->getMonogram();
-          $this->log(pht('Starting update for repository "%s".', $monogram));
+          $display_name = $repository->getDisplayName();
+          $this->log(
+            pht(
+              'Starting update for repository "%s".',
+              $display_name));
 
           unset($queue[$id]);
           $futures[$id] = $this->buildUpdateFuture(
@@ -299,6 +317,32 @@ final class PhabricatorRepositoryPullLocalDaemon
   /**
    * @task pull
    */
+  private function loadLastUpdate(PhabricatorRepository $repository) {
+    $table = new PhabricatorRepositoryStatusMessage();
+    $conn = $table->establishConnection('r');
+
+    $epoch = queryfx_one(
+      $conn,
+      'SELECT MAX(epoch) last_update FROM %T
+        WHERE repositoryID = %d
+          AND statusType IN (%Ls)',
+      $table->getTableName(),
+      $repository->getID(),
+      array(
+        PhabricatorRepositoryStatusMessage::TYPE_INIT,
+        PhabricatorRepositoryStatusMessage::TYPE_FETCH,
+      ));
+
+    if ($epoch) {
+      return (int)$epoch['last_update'];
+    }
+
+    return PhabricatorTime::getNow();
+  }
+
+  /**
+   * @task pull
+   */
   private function loadPullableRepositories(
     array $include,
     array $exclude,
@@ -354,117 +398,17 @@ final class PhabricatorRepositoryPullLocalDaemon
       }
     }
 
-    $service_phids = array();
-    foreach ($repositories as $key => $repository) {
-      $service_phid = $repository->getAlmanacServicePHID();
+    $viewer = $this->getViewer();
 
-      // If the repository is bound to a service but this host is not a
-      // recognized device, or vice versa, don't pull the repository.
-      $is_cluster_repo = (bool)$service_phid;
-      $is_cluster_device = (bool)$device;
-      if ($is_cluster_repo != $is_cluster_device) {
-        if ($is_cluster_device) {
-          $this->log(
-            pht(
-              'Repository "%s" is not a cluster repository, but the current '.
-              'host is a cluster device ("%s"), so the repository will not '.
-              'be updated on this host.',
-              $repository->getDisplayName(),
-              $device->getName()));
-        } else {
-          $this->log(
-            pht(
-              'Repository "%s" is a cluster repository, but the current '.
-              'host is not a cluster device (it has no device ID), so the '.
-              'repository will not be updated on this host.',
-              $repository->getDisplayName()));
-        }
-        unset($repositories[$key]);
-        continue;
-      }
+    $filter = id(new DiffusionLocalRepositoryFilter())
+      ->setViewer($viewer)
+      ->setDevice($device)
+      ->setRepositories($repositories);
 
-      if ($service_phid) {
-        $service_phids[] = $service_phid;
-      }
-    }
+    $repositories = $filter->execute();
 
-    if ($device) {
-      $device_phid = $device->getPHID();
-
-      if ($service_phids) {
-        // We could include `withDevicePHIDs()` here to pull a smaller result
-        // set, but we can provide more helpful diagnostic messages below if
-        // we fetch a little more data.
-        $services = id(new AlmanacServiceQuery())
-          ->setViewer($this->getViewer())
-          ->withPHIDs($service_phids)
-          ->withServiceTypes(
-            array(
-              AlmanacClusterRepositoryServiceType::SERVICETYPE,
-            ))
-          ->needBindings(true)
-          ->execute();
-        $services = mpull($services, null, 'getPHID');
-      } else {
-        $services = array();
-      }
-
-      foreach ($repositories as $key => $repository) {
-        $service_phid = $repository->getAlmanacServicePHID();
-
-        $service = idx($services, $service_phid);
-        if (!$service) {
-          $this->log(
-            pht(
-              'Repository "%s" is on cluster service "%s", but that service '.
-              'could not be loaded, so the repository will not be updated '.
-              'on this host.',
-              $repository->getDisplayName(),
-              $service_phid));
-          unset($repositories[$key]);
-          continue;
-        }
-
-        $bindings = $service->getBindings();
-        $bindings = mgroup($bindings, 'getDevicePHID');
-        $bindings = idx($bindings, $device_phid);
-        if (!$bindings) {
-          $this->log(
-            pht(
-              'Repository "%s" is on cluster service "%s", but that service '.
-              'is not bound to this device ("%s"), so the repository will '.
-              'not be updated on this host.',
-              $repository->getDisplayName(),
-              $service->getName(),
-              $device->getName()));
-          unset($repositories[$key]);
-          continue;
-        }
-
-        $all_disabled = true;
-        foreach ($bindings as $binding) {
-          if (!$binding->getIsDisabled()) {
-            $all_disabled = false;
-            break;
-          }
-        }
-
-        if ($all_disabled) {
-          $this->log(
-            pht(
-              'Repository "%s" is on cluster service "%s", but the binding '.
-              'between that service and this device ("%s") is disabled, so '.
-              'the not be updated on this host.',
-              $repository->getDisplayName(),
-              $service->getName(),
-              $device->getName()));
-          unset($repositories[$key]);
-          continue;
-        }
-
-        // We have a valid service that is actively bound to the current host
-        // device, so we're good to go.
-      }
+    foreach ($filter->getRejectionReasons() as $reason) {
+      $this->log($reason);
     }
 
     // Shuffle the repositories, then re-key the array since shuffle()
@@ -485,9 +429,9 @@ final class PhabricatorRepositoryPullLocalDaemon
     ExecFuture $future,
     $min_sleep) {
 
-    $monogram = $repository->getMonogram();
+    $display_name = $repository->getDisplayName();
 
-    $this->log(pht('Resolving update for "%s".', $monogram));
+    $this->log(pht('Resolving update for "%s".', $display_name));
 
     try {
       list($stdout, $stderr) = $future->resolvex();
@@ -495,17 +439,18 @@ final class PhabricatorRepositoryPullLocalDaemon
       $proxy = new PhutilProxyException(
         pht(
           'Error while updating the "%s" repository.',
-          $repository->getMonogram()),
+          $display_name),
         $ex);
       phlog($proxy);
 
-      return time() + $min_sleep;
+      $smart_wait = $repository->loadUpdateInterval($min_sleep);
+      return PhabricatorTime::getNow() + $smart_wait;
     }
 
     if (strlen($stderr)) {
       $stderr_msg = pht(
         'Unexpected output while updating repository "%s": %s',
-        $monogram,
+        $display_name,
         $stderr);
       phlog($stderr_msg);
     }
@@ -516,10 +461,10 @@ final class PhabricatorRepositoryPullLocalDaemon
       pht(
         'Based on activity in repository "%s", considering a wait of %s '.
         'seconds before update.',
-        $repository->getMonogram(),
+        $display_name,
         new PhutilNumber($smart_wait)));
 
-    return time() + $smart_wait;
+    return PhabricatorTime::getNow() + $smart_wait;
   }
 
 

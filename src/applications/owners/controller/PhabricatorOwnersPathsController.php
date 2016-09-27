@@ -64,7 +64,7 @@ final class PhabricatorOwnersPathsController
       $editor->applyTransactions($package, $xactions);
 
       return id(new AphrontRedirectResponse())
-        ->setURI('/owners/package/'.$package->getID().'/');
+        ->setURI($package->getURI());
     } else {
       $paths = $package->getPaths();
       $path_refs = mpull($paths, 'getRef');
@@ -82,7 +82,13 @@ final class PhabricatorOwnersPathsController
       }
     }
 
-    $repos = mpull($repos, 'getMonogram', 'getPHID');
+
+    $repo_map = array();
+    foreach ($repos as $key => $repo) {
+      $monogram = $repo->getMonogram();
+      $name = $repo->getName();
+      $repo_map[$repo->getPHID()] = "{$monogram} {$name}";
+    }
     asort($repos);
 
     $template = new AphrontTypeaheadTemplateView();
@@ -94,7 +100,7 @@ final class PhabricatorOwnersPathsController
         'root'                => 'path-editor',
         'table'               => 'paths',
         'add_button'          => 'addpath',
-        'repositories'        => $repos,
+        'repositories'        => $repo_map,
         'input_template'      => $template,
         'pathRefs'            => $path_refs,
 
@@ -106,7 +112,7 @@ final class PhabricatorOwnersPathsController
 
     require_celerity_resource('owners-path-editor-css');
 
-    $cancel_uri = '/owners/package/'.$package->getID().'/';
+    $cancel_uri = $package->getURI();
 
     $form = id(new AphrontFormView())
       ->setUser($viewer)

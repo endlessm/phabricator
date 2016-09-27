@@ -28,6 +28,8 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
   const CONTEXT_LIST  = 'list';
   const CONTEXT_PANEL = 'panel';
 
+  const BUCKET_NONE = 'none';
+
   public function setController(PhabricatorController $controller) {
     $this->controller = $controller;
     return $this;
@@ -96,8 +98,6 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
     return $this->navigationItems;
   }
 
-
-
   public function canUseInPanelContext() {
     return true;
   }
@@ -141,8 +141,8 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
    * @param PhabricatorSavedQuery The saved query to operate on.
    * @return The result of the query.
    */
-  public function buildQueryFromSavedQuery(PhabricatorSavedQuery $saved) {
-    $saved = clone $saved;
+  public function buildQueryFromSavedQuery(PhabricatorSavedQuery $original) {
+    $saved = clone $original;
     $this->willUseSavedQuery($saved);
 
     $fields = $this->buildSearchFields();
@@ -156,6 +156,7 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
       $map[$field->getKey()] = $value;
     }
 
+    $original->attachParameterMap($map);
     $query = $this->buildQueryFromParameters($map);
 
     $object = $this->newResultObject();
@@ -264,6 +265,18 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
         ->setKey('order')
         ->setOrderAliases($query->getBuiltinOrderAliasMap())
         ->setOptions($orders);
+    }
+
+    $buckets = $this->newResultBuckets();
+    if ($query && $buckets) {
+      $bucket_options = array(
+        self::BUCKET_NONE => pht('No Bucketing'),
+      ) + mpull($buckets, 'getResultBucketName');
+
+      $fields[] = id(new PhabricatorSearchSelectField())
+        ->setLabel(pht('Bucket'))
+        ->setKey('bucket')
+        ->setOptions($bucket_options);
     }
 
     $field_map = array();
@@ -700,50 +713,6 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
 
 
   /**
-   * Read a list of project PHIDs from a request in a flexible way.
-   *
-   * @param AphrontRequest  Request to read user PHIDs from.
-   * @param string          Key to read in the request.
-   * @return list<phid>     List of projet PHIDs and selector functions.
-   * @task read
-   */
-  protected function readProjectsFromRequest(AphrontRequest $request, $key) {
-    $list = $this->readListFromRequest($request, $key);
-
-    $phids = array();
-    $slugs = array();
-    $project_type = PhabricatorProjectProjectPHIDType::TYPECONST;
-    foreach ($list as $item) {
-      $type = phid_get_type($item);
-      if ($type == $project_type) {
-        $phids[] = $item;
-      } else {
-        if (PhabricatorTypeaheadDatasource::isFunctionToken($item)) {
-          // If this is a function, pass it through unchanged; we'll evaluate
-          // it later.
-          $phids[] = $item;
-        } else {
-          $slugs[] = $item;
-        }
-      }
-    }
-
-    if ($slugs) {
-      $projects = id(new PhabricatorProjectQuery())
-        ->setViewer($this->requireViewer())
-        ->withSlugs($slugs)
-        ->execute();
-      foreach ($projects as $project) {
-        $phids[] = $project->getPHID();
-      }
-      $phids = array_unique($phids);
-    }
-
-    return $phids;
-  }
-
-
-  /**
    * Read a list of subscribers from a request in a flexible way.
    *
    * @param AphrontRequest  Request to read PHIDs from.
@@ -834,19 +803,6 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
     }
 
     return $list;
-  }
-
-  protected function readDateFromRequest(
-    AphrontRequest $request,
-    $key) {
-
-    $value = AphrontFormDateControlValue::newFromRequest($request, $key);
-
-    if ($value->isEmpty()) {
-      return null;
-    }
-
-    return $value->getDictionary();
   }
 
   protected function readBoolFromRequest(
@@ -944,11 +900,35 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
 /* -(  Paging and Executing Queries  )--------------------------------------- */
 
 
+  protected function newResultBuckets() {
+    return array();
+  }
+
+  protected function getResultBucket(PhabricatorSavedQuery $saved) {
+    $key = $saved->getParameter('bucket');
+    if ($key == self::BUCKET_NONE) {
+      return null;
+    }
+
+    $buckets = $this->newResultBuckets();
+    return idx($buckets, $key);
+  }
+
+
   public function getPageSize(PhabricatorSavedQuery $saved) {
+    $bucket = $this->getResultBucket($saved);
+
     $limit = (int)$saved->getParameter('limit');
 
     if ($limit > 0) {
+      if ($bucket) {
+        $bucket->setPageSize($limit);
+      }
       return $limit;
+    }
+
+    if ($bucket) {
+      return $bucket->getPageSize();
     }
 
     return 100;
@@ -1114,6 +1094,22 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
       }
     }
 
+    $valid_constraints = array();
+    foreach ($fields as $field) {
+      foreach ($field->getValidConstraintKeys() as $key) {
+        $valid_constraints[$key] = true;
+      }
+    }
+
+    foreach ($constraints as $key => $constraint) {
+      if (empty($valid_constraints[$key])) {
+        throw new Exception(
+          pht(
+            'Constraint "%s" is not a valid constraint for this query.',
+            $key));
+      }
+    }
+
     foreach ($fields as $field) {
       if (!$field->getValueExistsInConduitRequest($constraints)) {
         continue;
@@ -1123,7 +1119,11 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
       $saved_query->setParameter($field->getKey(), $value);
     }
 
-    $this->saveQuery($saved_query);
+    // NOTE: Currently, when running an ad-hoc query we never persist it into
+    // a saved query. We might want to add an option to do this in the future
+    // (for example, to enable a CLI-to-Web workflow where user can view more
+    // details about results by following a link), but have no use cases for
+    // it today. If we do identify a use case, we could save the query here.
 
     $query = $this->buildQueryFromSavedQuery($saved_query);
     $pager = $this->newPagerForSavedQuery($saved_query);
@@ -1154,6 +1154,11 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
     if ($objects) {
       $field_extensions = $this->getConduitFieldExtensions();
 
+      $extension_data = array();
+      foreach ($field_extensions as $key => $extension) {
+        $extension_data[$key] = $extension->loadExtensionConduitData($objects);
+      }
+
       $attachment_data = array();
       foreach ($attachments as $key => $attachment) {
         $attachment_data[$key] = $attachment->loadAttachmentData(
@@ -1164,7 +1169,8 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
       foreach ($objects as $object) {
         $field_map = $this->getObjectWireFieldsForConduit(
           $object,
-          $field_extensions);
+          $field_extensions,
+          $extension_data);
 
         $attachment_map = array();
         foreach ($attachments as $key => $attachment) {
@@ -1197,6 +1203,7 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
       'data' => $data,
       'maps' => $method->getQueryMaps($query),
       'query' => array(
+        // This may be `null` if we have not saved the query.
         'queryKey' => $saved_query->getQueryKey(),
       ),
       'cursor' => array(
@@ -1327,11 +1334,13 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
 
   protected function getObjectWireFieldsForConduit(
     $object,
-    array $field_extensions) {
+    array $field_extensions,
+    array $extension_data) {
 
     $fields = array();
-    foreach ($field_extensions as $extension) {
-      $fields += $extension->getFieldValuesForConduit($object);
+    foreach ($field_extensions as $key => $extension) {
+      $data = idx($extension_data, $key, array());
+      $fields += $extension->getFieldValuesForConduit($object, $data);
     }
 
     return $fields;

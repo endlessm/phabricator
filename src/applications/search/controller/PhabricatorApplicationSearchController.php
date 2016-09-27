@@ -193,10 +193,12 @@ final class PhabricatorApplicationSearchController
     }
 
     $header = id(new PHUIHeaderView())
-      ->setHeader($title);
+      ->setHeader($title)
+      ->setProfileHeader(true);
 
     $box = id(new PHUIObjectBoxView())
-      ->setHeader($header);
+      ->setHeader($header)
+      ->addClass('application-search-results');
 
     if ($run_query || $named_query) {
       $box->setShowHide(
@@ -210,9 +212,11 @@ final class PhabricatorApplicationSearchController
     }
 
     $body[] = $box;
-
+    $more_crumbs = null;
 
     if ($run_query) {
+      $exec_errors = array();
+
       $box->setAnchor(
         id(new PhabricatorAnchorView())
           ->setAnchorName('R'));
@@ -266,24 +270,35 @@ final class PhabricatorApplicationSearchController
           if ($list->getContent()) {
             $box->appendChild($list->getContent());
           }
-          if ($list->getCollapsed()) {
-            $box->setCollapsed(true);
+
+          $result_header = $list->getHeader();
+          if ($result_header) {
+            $box->setHeader($result_header);
           }
+
+          $more_crumbs = $list->getCrumbs();
 
           if ($pager->willShowPagingControls()) {
             $pager_box = id(new PHUIBoxView())
-              ->addPadding(PHUI::PADDING_MEDIUM)
-              ->addMargin(PHUI::MARGIN_LARGE)
-              ->setBorder(true)
+              ->setColor(PHUIBoxView::GREY)
+              ->addClass('application-search-pager')
               ->appendChild($pager);
             $body[] = $pager_box;
           }
         }
       } catch (PhabricatorTypeaheadInvalidTokenException $ex) {
-        $errors[] = pht(
+        $exec_errors[] = pht(
           'This query specifies an invalid parameter. Review the '.
           'query parameters and correct errors.');
       }
+
+      // The engine may have encountered additional errors during rendering;
+      // merge them in and show everything.
+      foreach ($engine->getErrors() as $error) {
+        $exec_errors[] = $error;
+      }
+
+      $errors = $exec_errors;
     }
 
     if ($errors) {
@@ -292,14 +307,28 @@ final class PhabricatorApplicationSearchController
 
     $crumbs = $parent
       ->buildApplicationCrumbs()
-      ->addTextCrumb($title);
+      ->setBorder(true);
+
+    if ($more_crumbs) {
+      $query_uri = $engine->getQueryResultsPageURI($saved_query->getQueryKey());
+      $crumbs->addTextCrumb($title, $query_uri);
+
+      foreach ($more_crumbs as $crumb) {
+        $crumbs->addCrumb($crumb);
+      }
+    } else {
+      $crumbs->addTextCrumb($title);
+    }
+
+    require_celerity_resource('application-search-view-css');
 
     return $this->newPage()
       ->setApplicationMenu($this->buildApplicationMenu())
       ->setTitle(pht('Query: %s', $title))
       ->setCrumbs($crumbs)
       ->setNavigation($nav)
-      ->appendChild($body);
+      ->appendChild($body)
+      ->addClass('application-search-view');
   }
 
   private function processEditRequest() {
@@ -376,19 +405,28 @@ final class PhabricatorApplicationSearchController
 
     $crumbs = $parent
       ->buildApplicationCrumbs()
-      ->addTextCrumb(pht('Saved Queries'), $engine->getQueryManagementURI());
+      ->addTextCrumb(pht('Saved Queries'), $engine->getQueryManagementURI())
+      ->setBorder(true);
 
     $nav->selectFilter('query/edit');
 
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Saved Queries'))
+      ->setProfileHeader(true);
+
     $box = id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Saved Queries'))
-      ->setObjectList($list);
+      ->setHeader($header)
+      ->setObjectList($list)
+      ->addClass('application-search-results');
+
+    require_celerity_resource('application-search-view-css');
 
     return $this->newPage()
       ->setApplicationMenu($this->buildApplicationMenu())
       ->setTitle(pht('Saved Queries'))
       ->setCrumbs($crumbs)
       ->setNavigation($nav)
+      ->addClass('application-search-view')
       ->appendChild($box);
   }
 

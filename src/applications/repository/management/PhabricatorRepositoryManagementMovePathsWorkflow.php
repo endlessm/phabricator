@@ -19,6 +19,10 @@ final class PhabricatorRepositoryManagementMovePathsWorkflow
             'param' => 'prefix',
             'help' => pht('Replace matching prefixes with this string.'),
           ),
+          array(
+            'name' => 'force',
+            'help' => pht('Apply changes without prompting.'),
+          ),
         ));
   }
 
@@ -47,6 +51,8 @@ final class PhabricatorRepositoryManagementMovePathsWorkflow
           'You must specify a path prefix to move to with --to.'));
     }
 
+    $is_force = $args->getArg('force');
+
     $rows = array();
 
     $any_changes = false;
@@ -66,7 +72,7 @@ final class PhabricatorRepositoryManagementMovePathsWorkflow
       } else {
         $dst = $to.substr($src, strlen($from));
 
-        $row['action'] = phutil_console_format('**%s**', pht('Move'));
+        $row['action'] = tsprintf('**%s**', pht('Move'));
         $row['dst'] = $dst;
         $row['move'] = true;
         $any_changes = true;
@@ -94,7 +100,7 @@ final class PhabricatorRepositoryManagementMovePathsWorkflow
       ->addColumn(
         'dst',
         array(
-          'title' => pht('dst'),
+          'title' => pht('Dst'),
         ))
       ->setBorders(true);
 
@@ -118,7 +124,7 @@ final class PhabricatorRepositoryManagementMovePathsWorkflow
     }
 
     $prompt = pht('Apply these changes?');
-    if (!phutil_console_confirm($prompt)) {
+    if (!$is_force && !phutil_console_confirm($prompt)) {
       throw new Exception(pht('Declining to apply changes.'));
     }
 
@@ -128,14 +134,12 @@ final class PhabricatorRepositoryManagementMovePathsWorkflow
       }
 
       $repo = $row['repository'];
-      $details = $repo->getDetails();
-      $details['local-path'] = $row['dst'];
 
       queryfx(
         $repo->establishConnection('w'),
-        'UPDATE %T SET details = %s WHERE id = %d',
+        'UPDATE %T SET localPath = %s WHERE id = %d',
         $repo->getTableName(),
-        phutil_json_encode($details),
+        $row['dst'],
         $repo->getID());
     }
 

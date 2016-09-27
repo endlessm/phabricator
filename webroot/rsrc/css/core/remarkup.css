@@ -51,6 +51,28 @@
   overflow: auto;
   padding: 12px;
   border-radius: 3px;
+  white-space: pre-wrap;
+}
+
+.phabricator-remarkup kbd {
+  display: inline-block;
+  min-width: 1em;
+  padding: 4px 5px 5px;
+  font-weight: normal;
+  font-size: 0.8rem;
+  text-align: center;
+  text-decoration: none;
+  line-height: 0.6rem;
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 rgba({$alphablue},0.08);
+  user-select: none;
+  background: #f7f7f7;
+  border: 1px solid {$lightgreyborder};
+}
+
+.phabricator-remarkup .kbd-join {
+  padding: 0 4px;
+  color: {$lightgreytext};
 }
 
 .phabricator-remarkup pre.remarkup-counterexample {
@@ -218,6 +240,16 @@
   width: 50%;
 }
 
+video.phabricator-media {
+  background: {$greybackground};
+}
+
+.phabricator-remarkup video {
+  display: block;
+  margin: 0 auto;
+  max-width: 95%;
+}
+
 .phabricator-remarkup-mention-exists {
   font-weight: bold;
   background: #e6f3ff;
@@ -232,6 +264,18 @@
 .aphront-panel-preview .phabricator-remarkup-mention-unknown {
   font-weight: bold;
   background: #ffaaaa;
+}
+
+.phabricator-remarkup .phriction-link {
+  font-weight: bold;
+}
+
+.phabricator-remarkup .phriction-link-missing {
+  color: {$red};
+}
+
+.phabricator-remarkup .phriction-link-lock {
+  color: {$greytext};
 }
 
 .phabricator-remarkup-mention-nopermission .phui-tag-core {
@@ -341,12 +385,14 @@
   box-shadow: 1px 1px 2px rgba({$alphablack}, 0.20);
 }
 
-.phabricator-remarkup-embed-image-full {
+.phabricator-remarkup-embed-image-full,
+.phabricator-remarkup-embed-image-wide {
   display: inline-block;
   max-width: 100%;
 }
 
-.phabricator-remarkup-embed-image-full img {
+.phabricator-remarkup-embed-image-full img,
+.phabricator-remarkup-embed-image-wide img {
   height: auto;
   max-width: 100%;
 }
