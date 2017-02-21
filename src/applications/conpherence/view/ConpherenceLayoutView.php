@@ -1,12 +1,13 @@
 <?php
 
-final class ConpherenceLayoutView extends AphrontView {
+final class ConpherenceLayoutView extends AphrontTagView {
 
   private $thread;
   private $baseURI;
   private $threadView;
   private $role;
   private $header;
+  private $search;
   private $messages;
   private $replyForm;
   private $latestTransactionID;
@@ -23,6 +24,11 @@ final class ConpherenceLayoutView extends AphrontView {
 
   public function setHeader($header) {
     $this->header = $header;
+    return $this;
+  }
+
+  public function setSearch($search) {
+    $this->search = $search;
     return $this;
   }
 
@@ -55,18 +61,23 @@ final class ConpherenceLayoutView extends AphrontView {
     return $this;
   }
 
-  public function getWidgetColumnVisible() {
-    $widget_key = PhabricatorConpherenceWidgetVisibleSetting::SETTINGKEY;
-    $user = $this->getUser();
-    return (bool)$user->getUserSetting($widget_key, false);
+  protected function getTagAttributes() {
+    $classes = array();
+    $classes[] = 'conpherence-layout';
+    $classes[] = 'hide-widgets';
+    $classes[] = 'conpherence-role-'.$this->role;
+
+    return array(
+      'id'    => 'conpherence-main-layout',
+      'sigil' => 'conpherence-layout',
+      'class' => implode(' ', $classes),
+    );
   }
 
-  public function render() {
+  protected function getTagContent() {
     require_celerity_resource('conpherence-menu-css');
     require_celerity_resource('conpherence-message-pane-css');
     require_celerity_resource('conpherence-participant-pane-css');
-
-    $layout_id = 'conpherence-main-layout';
 
     $selected_id = null;
     $selected_thread_id = null;
@@ -87,7 +98,7 @@ final class ConpherenceLayoutView extends AphrontView {
     $this->initBehavior('conpherence-menu',
       array(
         'baseURI' => $this->baseURI,
-        'layoutID' => $layout_id,
+        'layoutID' => 'conpherence-main-layout',
         'selectedID' => $selected_id,
         'selectedThreadID' => $selected_thread_id,
         'selectedThreadPHID' => $selected_thread_phid,
@@ -99,26 +110,9 @@ final class ConpherenceLayoutView extends AphrontView {
         'hasWidgets' => false,
       ));
 
-    $classes = array();
-    if (!$this->getUser()->isLoggedIn()) {
-      $classes[] = 'conpherence-logged-out';
-    }
-
-    if (!$this->getWidgetColumnVisible()) {
-      $classes[] = 'hide-widgets';
-    }
-
     $this->initBehavior('conpherence-participant-pane');
 
-    return javelin_tag(
-      'div',
-      array(
-        'id'    => $layout_id,
-        'sigil' => 'conpherence-layout',
-        'class' => 'conpherence-layout '.
-                    implode(' ', $classes).
-                    ' conpherence-role-'.$this->role,
-      ),
+    return
       array(
         javelin_tag(
           'div',
@@ -134,6 +128,12 @@ final class ConpherenceLayoutView extends AphrontView {
             'class' => 'conpherence-content-pane',
           ),
           array(
+            phutil_tag(
+              'div',
+              array(
+                'class' => 'conpherence-loading-mask',
+              ),
+              ''),
             javelin_tag(
               'div',
               array(
@@ -187,6 +187,14 @@ final class ConpherenceLayoutView extends AphrontView {
                     'sigil' => 'conpherence-messages',
                   ),
                   nonempty($this->messages, '')),
+                javelin_tag(
+                  'div',
+                  array(
+                    'class' => 'conpherence-search-main',
+                    'id' => 'conpherence-search-main',
+                    'sigil' => 'conpherence-search-main',
+                  ),
+                  nonempty($this->search, '')),
                 phutil_tag(
                   'div',
                   array(
@@ -202,7 +210,7 @@ final class ConpherenceLayoutView extends AphrontView {
                   nonempty($this->replyForm, '')),
               )),
           )),
-      ));
+      );
   }
 
   private function buildNUXView() {
@@ -233,13 +241,7 @@ final class ConpherenceLayoutView extends AphrontView {
 
       $box = id(new PHUIObjectBoxView())
         ->setHeader($header)
-        ->setObjectList($view->getObjectList());
-      if ($viewer->isLoggedIn()) {
-        $info = id(new PHUIInfoView())
-          ->appendChild(pht('You have not joined any rooms yet.'))
-          ->setSeverity(PHUIInfoView::SEVERITY_NOTICE);
-        $box->setInfoView($info);
-      }
+        ->setObjectList($view->getContent());
 
       return $box;
     } else {

@@ -139,7 +139,7 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
    * Executes the saved query.
    *
    * @param PhabricatorSavedQuery The saved query to operate on.
-   * @return The result of the query.
+   * @return PhabricatorQuery The result of the query.
    */
   public function buildQueryFromSavedQuery(PhabricatorSavedQuery $original) {
     $saved = clone $original;
@@ -406,6 +406,10 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
     return $this->getURI('query/edit/');
   }
 
+  public function getQueryBaseURI() {
+    return $this->getURI('');
+  }
+
 
   /**
    * Return the URI to a path within the application. Used to construct default
@@ -465,7 +469,7 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
 
   public function loadAllNamedQueries() {
     $viewer = $this->requireViewer();
-    $builtin = $this->getBuiltinQueries($viewer);
+    $builtin = $this->getBuiltinQueries();
 
     if ($this->namedQueries === null) {
       $named_queries = id(new PhabricatorNamedQueryQuery())
@@ -904,7 +908,7 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
     return array();
   }
 
-  protected function getResultBucket(PhabricatorSavedQuery $saved) {
+  public function getResultBucket(PhabricatorSavedQuery $saved) {
     $key = $saved->getParameter('bucket');
     if ($key == self::BUCKET_NONE) {
       return null;
@@ -1115,7 +1119,9 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
         continue;
       }
 
-      $value = $field->readValueFromConduitRequest($constraints);
+      $value = $field->readValueFromConduitRequest(
+        $constraints,
+        $request->getIsStrictlyTyped());
       $saved_query->setParameter($field->getKey(), $value);
     }
 
@@ -1388,6 +1394,10 @@ abstract class PhabricatorApplicationSearchEngine extends Phobject {
 
   protected function getNewUserBody() {
     return null;
+  }
+
+  public function newUseResultsActions(PhabricatorSavedQuery $saved) {
+    return array();
   }
 
 }

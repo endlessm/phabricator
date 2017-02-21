@@ -8,6 +8,7 @@
  *           javelin-uri
  *           javelin-behavior-device
  *           phabricator-title
+ *           phabricator-favicon
  */
 
 JX.behavior('aphlict-dropdown', function(config, statics) {
@@ -17,6 +18,8 @@ JX.behavior('aphlict-dropdown', function(config, statics) {
   var dropdown = JX.$(config.dropdownID);
   var bubble = JX.$(config.bubbleID);
   var icon = JX.DOM.scry(bubble, 'span', 'menu-icon')[0];
+  var favicon = config.favicon;
+  var message_favicon = config.message_favicon;
 
   var count;
   if (config.countID) {
@@ -26,13 +29,23 @@ JX.behavior('aphlict-dropdown', function(config, statics) {
   var request = null;
   var dirty = config.local ? false : true;
 
+  function _updateFavicon(new_count) {
+    if ((config.countType == 'messages') && (new_count)) {
+      JX.Favicon.setFavicon(message_favicon);
+    } else if (config.countType == 'messages') {
+      JX.Favicon.setFavicon(favicon);
+    }
+  }
+
   if (config.countType) {
     JX.Title.setCount(config.countType, config.countNumber);
+    _updateFavicon(config.countNumber);
   }
 
   function _updateCount(number) {
     if (config.countType) {
       JX.Title.setCount(config.countType, number);
+      _updateFavicon(number);
     } else {
       return;
     }
@@ -78,24 +91,6 @@ JX.behavior('aphlict-dropdown', function(config, statics) {
     null,
     function (e) {
       var data = e.getData();
-      if (config.local && config.applicationClass) {
-        var local_dropdowns = data.newResponse.aphlictDropdowns;
-        if (local_dropdowns[config.applicationClass]) {
-          JX.DOM.replace(
-            dropdown,
-            JX.$H(local_dropdowns[config.applicationClass]));
-          dropdown = JX.$(config.dropdownID);
-          if (dropdown.childNodes.length === 0) {
-            JX.DOM.hide(bubble);
-          } else {
-            JX.DOM.show(bubble);
-          }
-        } else {
-          JX.DOM.hide(bubble);
-        }
-        return;
-      }
-
       if (!data.fromServer) {
         return;
       }

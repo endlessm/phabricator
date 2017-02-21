@@ -37,6 +37,7 @@ final class PhabricatorFilesApplication extends PhabricatorApplication {
   public function getRemarkupRules() {
     return array(
       new PhabricatorEmbedFileRemarkupRule(),
+      new PhabricatorImageRemarkupRule(),
     );
   }
 
@@ -75,6 +76,7 @@ final class PhabricatorFilesApplication extends PhabricatorApplication {
         'dropupload/' => 'PhabricatorFileDropUploadController',
         'compose/' => 'PhabricatorFileComposeController',
         'comment/(?P<id>[1-9]\d*)/' => 'PhabricatorFileCommentController',
+        'thread/(?P<phid>[^/]+)/' => 'PhabricatorFileLightboxController',
         'delete/(?P<id>[1-9]\d*)/' => 'PhabricatorFileDeleteController',
         'edit/(?P<id>[1-9]\d*)/' => 'PhabricatorFileEditController',
         'info/(?P<phid>[^/]+)/' => 'PhabricatorFileInfoController',
@@ -125,6 +127,12 @@ final class PhabricatorFilesApplication extends PhabricatorApplication {
           'This page documents the commands you can use to interact with '.
           'files.'),
       ),
+    );
+  }
+
+  public function getQuicksandURIPatternBlacklist() {
+    return array(
+      '/file/data/.*',
     );
   }
 

@@ -2,9 +2,6 @@
  * @provides conpherence-header-pane-css
  */
 
-.conpherence-header-pane {
-}
-
 .conpherence-header-pane .phui-header-shell {
   padding: 8px 16px 10px;
   min-height: 38px;
@@ -21,10 +18,36 @@
   padding: 0;
   font-size: 12px;
   margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-.conpherence-header-pane .phui-header-shell.conpherence-no-topic {
-  padding: 15px 16px 5px;
+.conpherence-header-pane .phui-header-col1 {
+  width: 46px;
+  height: 35px;
+}
+
+.conpherence-header-pane .phui-header-image {
+  height: 35px;
+  width: 35px;
+  background-size: 35px;
+  position: absolute;
+  top: 4px;
+  left: 0;
+}
+
+.conpherence-header-pane .phui-header-image-href {
+  position: inherit;
+}
+
+.conpherence-header-pane .phui-header-col2 {
+  height: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 60%;
+  max-width: 0;
 }
 
 .conpherence-header-pane .phui-header-action-list .phui-header-action-item
@@ -51,7 +74,17 @@
 }
 
 .conpherence-participant-toggle.phui-icon-circle .phui-icon-view {
-    color: {$sky};
+  color: {$sky};
+}
+
+.show-searchbar .conpherence-search-toggle.phui-icon-circle {
+  text-decoration: none;
+  border-color: {$green};
+  cursor: pointer;
+}
+
+.show-searchbar .conpherence-search-toggle.phui-icon-circle .phui-icon-view {
+  color: {$green};
 }
 
 .hide-widgets .conpherence-participant-toggle.phui-icon-circle {
@@ -61,5 +94,5 @@
 }
 
 .hide-widgets .conpherence-participant-toggle.phui-icon-circle .phui-icon-view {
-    color: {$lightblueborder};
+  color: {$lightblueborder};
 }

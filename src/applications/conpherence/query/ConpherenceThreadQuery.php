@@ -9,14 +9,13 @@ final class ConpherenceThreadQuery
   private $ids;
   private $participantPHIDs;
   private $needParticipants;
-  private $needCropPics;
-  private $needOrigPics;
   private $needTransactions;
   private $needParticipantCache;
   private $afterTransactionID;
   private $beforeTransactionID;
   private $transactionLimit;
   private $fulltext;
+  private $needProfileImage;
 
   public function needParticipantCache($participant_cache) {
     $this->needParticipantCache = $participant_cache;
@@ -28,13 +27,8 @@ final class ConpherenceThreadQuery
     return $this;
   }
 
-  public function needCropPics($need) {
-    $this->needCropPics = $need;
-    return $this;
-  }
-
-  public function needOrigPics($need_widget_data) {
-    $this->needOrigPics = $need_widget_data;
+  public function needProfileImage($need) {
+    $this->needProfileImage = $need;
     return $this;
   }
 
@@ -82,6 +76,12 @@ final class ConpherenceThreadQuery
     return $this;
   }
 
+  public function withTitleNgrams($ngrams) {
+    return $this->withNgramsConstraint(
+      id(new ConpherenceThreadTitleNgrams()),
+      $ngrams);
+  }
+
   protected function loadPage() {
     $table = new ConpherenceThread();
     $conn_r = $table->establishConnection('r');
@@ -110,14 +110,33 @@ final class ConpherenceThreadQuery
       if ($this->needTransactions) {
         $this->loadTransactionsAndHandles($conpherences);
       }
-      if ($this->needOrigPics || $this->needCropPics) {
-        $this->initImages($conpherences);
-      }
-      if ($this->needOrigPics) {
-        $this->loadOrigPics($conpherences);
-      }
-      if ($this->needCropPics) {
-        $this->loadCropPics($conpherences);
+      if ($this->needProfileImage) {
+        $default = null;
+        $file_phids = mpull($conpherences, 'getProfileImagePHID');
+        $file_phids = array_filter($file_phids);
+        if ($file_phids) {
+          $files = id(new PhabricatorFileQuery())
+            ->setParentQuery($this)
+            ->setViewer($this->getViewer())
+            ->withPHIDs($file_phids)
+            ->execute();
+          $files = mpull($files, null, 'getPHID');
+        } else {
+          $files = array();
+        }
+
+        foreach ($conpherences as $conpherence) {
+          $file = idx($files, $conpherence->getProfileImagePHID());
+          if (!$file) {
+            if (!$default) {
+              $default = PhabricatorFile::loadBuiltin(
+                $this->getViewer(),
+                'conpherence.png');
+            }
+            $file = $default;
+          }
+          $conpherence->attachProfileImageFile($file);
+        }
       }
     }
 
@@ -132,61 +151,100 @@ final class ConpherenceThreadQuery
     }
   }
 
-  protected function buildJoinClause(AphrontDatabaseConnection $conn_r) {
-    $joins = array();
+  protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
+    $joins = parent::buildJoinClauseParts($conn);
 
     if ($this->participantPHIDs !== null) {
       $joins[] = qsprintf(
-        $conn_r,
+        $conn,
         'JOIN %T p ON p.conpherencePHID = thread.phid',
         id(new ConpherenceParticipant())->getTableName());
     }
 
     if (strlen($this->fulltext)) {
       $joins[] = qsprintf(
-        $conn_r,
+        $conn,
         'JOIN %T idx ON idx.threadPHID = thread.phid',
         id(new ConpherenceIndex())->getTableName());
     }
 
-    $joins[] = $this->buildApplicationSearchJoinClause($conn_r);
-    return implode(' ', $joins);
+    // See note in buildWhereClauseParts() about this optimization.
+    $viewer = $this->getViewer();
+    if (!$viewer->isOmnipotent() && $viewer->isLoggedIn()) {
+      $joins[] = qsprintf(
+        $conn,
+        'LEFT JOIN %T vp ON vp.conpherencePHID = thread.phid
+          AND vp.participantPHID = %s',
+        id(new ConpherenceParticipant())->getTableName(),
+        $viewer->getPHID());
+    }
+
+    return $joins;
   }
 
-  protected function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
-    $where[] = $this->buildPagingClause($conn_r);
+    // Optimize policy filtering of private rooms. If we are not looking for
+    // particular rooms by ID or PHID, we can just skip over any rooms with
+    // "View Policy: Room Participants" if the viewer isn't a participant: we
+    // know they won't be able to see the room.
+    // This avoids overheating browse/search queries, since it's common for
+    // a large number of rooms to be private and have this view policy.
+    $viewer = $this->getViewer();
+
+    $can_optimize =
+      !$viewer->isOmnipotent() &&
+      ($this->ids === null) &&
+      ($this->phids === null);
+
+    if ($can_optimize) {
+      $members_policy = id(new ConpherenceThreadMembersPolicyRule())
+        ->getObjectPolicyFullKey();
+
+      if ($viewer->isLoggedIn()) {
+        $where[] = qsprintf(
+          $conn,
+          'thread.viewPolicy != %s OR vp.participantPHID = %s',
+          $members_policy,
+          $viewer->getPHID());
+      } else {
+        $where[] = qsprintf(
+          $conn,
+          'thread.viewPolicy != %s',
+          $members_policy);
+      }
+    }
 
     if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'thread.id IN (%Ld)',
         $this->ids);
     }
 
     if ($this->phids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'thread.phid IN (%Ls)',
         $this->phids);
     }
 
     if ($this->participantPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'p.participantPHID IN (%Ls)',
         $this->participantPHIDs);
     }
 
     if (strlen($this->fulltext)) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'MATCH(idx.corpus) AGAINST (%s IN BOOLEAN MODE)',
         $this->fulltext);
     }
 
-    return $this->formatWhereClause($where);
+    return $where;
   }
 
   private function loadParticipantsAndInitHandles(array $conpherences) {
@@ -263,50 +321,6 @@ final class ConpherenceThreadQuery
       $conpherence->attachHandles($conpherence->getHandles() + $handles);
       $conpherence->attachTransactions($current_transactions);
     }
-    return $this;
-  }
-
-  private function loadOrigPics(array $conpherences) {
-    return $this->loadPics(
-      $conpherences,
-      ConpherenceImageData::SIZE_ORIG);
-  }
-
-  private function loadCropPics(array $conpherences) {
-    return $this->loadPics(
-      $conpherences,
-      ConpherenceImageData::SIZE_CROP);
-  }
-
-  private function initImages($conpherences) {
-    foreach ($conpherences as $conpherence) {
-      $conpherence->attachImages(array());
-    }
-  }
-
-  private function loadPics(array $conpherences, $size) {
-    $conpherence_pic_phids = array();
-    foreach ($conpherences as $conpherence) {
-      $phid = $conpherence->getImagePHID($size);
-      if ($phid) {
-        $conpherence_pic_phids[$conpherence->getPHID()] = $phid;
-      }
-    }
-
-    if (!$conpherence_pic_phids) {
-      return $this;
-    }
-
-    $files = id(new PhabricatorFileQuery())
-      ->setViewer($this->getViewer())
-      ->withPHIDs($conpherence_pic_phids)
-      ->execute();
-    $files = mpull($files, null, 'getPHID');
-
-    foreach ($conpherence_pic_phids as $conpherence_phid => $pic_phid) {
-      $conpherences[$conpherence_phid]->setImage($files[$pic_phid], $size);
-    }
-
     return $this;
   }
 

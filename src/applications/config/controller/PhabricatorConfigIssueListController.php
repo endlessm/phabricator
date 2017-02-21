@@ -9,10 +9,12 @@ final class PhabricatorConfigIssueListController
     $nav = $this->buildSideNavView();
     $nav->selectFilter('issue/');
 
-    $issues = PhabricatorSetupCheck::runNormalChecks();
-    PhabricatorSetupCheck::setOpenSetupIssueKeys(
-      PhabricatorSetupCheck::getUnignoredIssueKeys($issues),
-      $update_database = true);
+    $engine = new PhabricatorSetupEngine();
+    $response = $engine->execute();
+    if ($response) {
+      return $response;
+    }
+    $issues = $engine->getIssues();
 
     $important = $this->buildIssueList(
       $issues,
@@ -47,7 +49,7 @@ final class PhabricatorConfigIssueListController
       ->setProfileHeader(true);
 
     $crumbs = $this
-      ->buildApplicationCrumbs($nav)
+      ->buildApplicationCrumbs()
       ->addTextCrumb(pht('Setup Issues'))
       ->setBorder(true);
 
