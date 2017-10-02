@@ -19,6 +19,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
   private $showFooter = true;
   private $showDurableColumn = true;
   private $quicksandConfig = array();
+  private $tabs;
   private $crumbs;
   private $navigation;
 
@@ -159,6 +160,17 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
     return $this->crumbs;
   }
 
+  public function setTabs(PHUIListView $tabs) {
+    $tabs->setType(PHUIListView::TABBAR_LIST);
+    $tabs->addClass('phabricator-standard-page-tabs');
+    $this->tabs = $tabs;
+    return $this;
+  }
+
+  public function getTabs() {
+    return $this->tabs;
+  }
+
   public function setNavigation(AphrontSideNavFilterView $navigation) {
     $this->navigation = $navigation;
     return $this;
@@ -216,7 +228,6 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
     require_celerity_resource('phabricator-standard-page-view');
     require_celerity_resource('conpherence-durable-column-view');
     require_celerity_resource('font-lato');
-    require_celerity_resource('font-aleo');
 
     Javelin::initBehavior('workflow', array());
 
@@ -269,7 +280,8 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
       }
 
       $icon = id(new PHUIIconView())
-        ->setIcon('fa-download');
+        ->setIcon('fa-download')
+        ->addClass('phui-icon-circle-icon');
       $lightbox_id = celerity_generate_unique_node_id();
       $download_form = phabricator_form(
         $user,
@@ -528,6 +540,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
     $footer = $this->renderFooter();
 
     $nav = $this->getNavigation();
+    $tabs = $this->getTabs();
     if ($nav) {
       $crumbs = $this->getCrumbs();
       if ($crumbs) {
@@ -541,7 +554,15 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
 
       $crumbs = $this->getCrumbs();
       if ($crumbs) {
+        if ($this->getTabs()) {
+          $crumbs->setBorder(true);
+        }
         $content[] = $crumbs;
+      }
+
+      $tabs = $this->getTabs();
+      if ($tabs) {
+        $content[] = $tabs;
       }
 
       $content[] = $body;

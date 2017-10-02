@@ -340,6 +340,9 @@ final class PhabricatorMetaMTAMail
     return $this->save();
   }
 
+  /**
+   * @return this
+   */
   public function save() {
     if ($this->getID()) {
       return parent::save();
@@ -369,15 +372,15 @@ final class PhabricatorMetaMTAMail
       }
       $editor->save();
 
-      // Queue a task to send this mail.
-      $mailer_task = PhabricatorWorker::scheduleTask(
-        'PhabricatorMetaMTAWorker',
-        $this->getID(),
-        array(
-          'priority' => PhabricatorWorker::PRIORITY_ALERTS,
-        ));
-
     $this->saveTransaction();
+
+    // Queue a task to send this mail.
+    $mailer_task = PhabricatorWorker::scheduleTask(
+      'PhabricatorMetaMTAWorker',
+      $this->getID(),
+      array(
+        'priority' => PhabricatorWorker::PRIORITY_ALERTS,
+      ));
 
     return $result;
   }

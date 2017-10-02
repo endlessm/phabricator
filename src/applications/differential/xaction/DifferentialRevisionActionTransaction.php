@@ -19,6 +19,10 @@ abstract class DifferentialRevisionActionTransaction
   abstract protected function validateAction($object, PhabricatorUser $viewer);
   abstract protected function getRevisionActionLabel();
 
+  protected function validateOptionValue($object, $actor, array $value) {
+    return null;
+  }
+
   public function getCommandKeyword() {
     return null;
   }
@@ -48,7 +52,8 @@ abstract class DifferentialRevisionActionTransaction
     return DifferentialRevisionEditEngine::ACTIONGROUP_REVISION;
   }
 
-  protected function getRevisionActionDescription() {
+  protected function getRevisionActionDescription(
+    DifferentialRevision $revision) {
     return null;
   }
 
@@ -70,13 +75,28 @@ abstract class DifferentialRevisionActionTransaction
     return ($viewer->getPHID() === $revision->getAuthorPHID());
   }
 
+  protected function getActionOptions(
+    PhabricatorUser $viewer,
+    DifferentialRevision $revision) {
+    return array(
+      array(),
+      null,
+    );
+  }
+
   public function newEditField(
     DifferentialRevision $revision,
     PhabricatorUser $viewer) {
 
+    // Actions in the "review" group, like "Accept Revision", do not require
+    // that the actor be able to edit the revision.
+    $group_review = DifferentialRevisionEditEngine::ACTIONGROUP_REVIEW;
+    $is_review = ($this->getRevisionActionGroupKey() == $group_review);
+
     $field = id(new PhabricatorApplyEditField())
       ->setKey($this->getRevisionActionKey())
       ->setTransactionType($this->getTransactionTypeConstant())
+      ->setCanApplyWithoutEditCapability($is_review)
       ->setValue(true);
 
     if ($this->isActionAvailable($revision, $viewer)) {
@@ -84,7 +104,7 @@ abstract class DifferentialRevisionActionTransaction
       if ($label !== null) {
         $field->setCommentActionLabel($label);
 
-        $description = $this->getRevisionActionDescription();
+        $description = $this->getRevisionActionDescription($revision);
         $field->setActionDescription($description);
 
         $group_key = $this->getRevisionActionGroupKey();
@@ -101,6 +121,21 @@ abstract class DifferentialRevisionActionTransaction
         // It's not clear that these combinations are actually useful, so just
         // keep things simple for now.
         $field->setActionConflictKey('revision.action');
+
+        list($options, $value) = $this->getActionOptions($viewer, $revision);
+
+        // Show the options if the user can select on behalf of two or more
+        // reviewers, or can force-accept on behalf of one or more reviewers,
+        // or can accept on behalf of a reviewer other than themselves (see
+        // T12533).
+        $can_multi = (count($options) > 1);
+        $can_force = (count($value) < count($options));
+        $not_self = (head_key($options) != $viewer->getPHID());
+
+        if ($can_multi || $can_force || $not_self) {
+          $field->setOptions($options);
+          $field->setValue($value);
+        }
       }
     }
 
@@ -122,6 +157,20 @@ abstract class DifferentialRevisionActionTransaction
       if ($action_exception) {
         $errors[] = $this->newInvalidError(
           $action_exception->getMessage(),
+          $xaction);
+        continue;
+      }
+
+      $new = $xaction->getNewValue();
+      if (!is_array($new)) {
+        continue;
+      }
+
+      try {
+        $this->validateOptionValue($object, $actor, $new);
+      } catch (Exception $ex) {
+        $errors[] = $this->newInvalidError(
+          $ex->getMessage(),
           $xaction);
       }
     }

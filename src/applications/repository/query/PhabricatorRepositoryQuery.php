@@ -8,7 +8,6 @@ final class PhabricatorRepositoryQuery
   private $callsigns;
   private $types;
   private $uuids;
-  private $nameContains;
   private $uris;
   private $datasourceQuery;
   private $slugs;
@@ -36,6 +35,7 @@ final class PhabricatorRepositoryQuery
   private $needCommitCounts;
   private $needProjectPHIDs;
   private $needURIs;
+  private $needProfileImage;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -115,11 +115,6 @@ final class PhabricatorRepositoryQuery
     return $this;
   }
 
-  public function withNameContains($contains) {
-    $this->nameContains = $contains;
-    return $this;
-  }
-
   public function withURIs(array $uris) {
     $this->uris = $uris;
     return $this;
@@ -157,6 +152,11 @@ final class PhabricatorRepositoryQuery
 
   public function needURIs($need_uris) {
     $this->needURIs = $need_uris;
+    return $this;
+  }
+
+  public function needProfileImage($need) {
+    $this->needProfileImage = $need;
     return $this;
   }
 
@@ -371,6 +371,36 @@ final class PhabricatorRepositoryQuery
       foreach ($repositories as $repository) {
         $repository_uris = idx($uri_groups, $repository->getPHID(), array());
         $repository->attachURIs($repository_uris);
+      }
+    }
+
+    if ($this->needProfileImage) {
+      $default = null;
+
+      $file_phids = mpull($repositories, 'getProfileImagePHID');
+      $file_phids = array_filter($file_phids);
+      if ($file_phids) {
+        $files = id(new PhabricatorFileQuery())
+          ->setParentQuery($this)
+          ->setViewer($this->getViewer())
+          ->withPHIDs($file_phids)
+          ->execute();
+        $files = mpull($files, null, 'getPHID');
+      } else {
+        $files = array();
+      }
+
+      foreach ($repositories as $repository) {
+        $file = idx($files, $repository->getProfileImagePHID());
+        if (!$file) {
+          if (!$default) {
+            $default = PhabricatorFile::loadBuiltin(
+              $this->getViewer(),
+              'repo/code.png');
+          }
+          $file = $default;
+        }
+        $repository->attachProfileImageFile($file);
       }
     }
 
@@ -623,13 +653,6 @@ final class PhabricatorRepositoryQuery
         $conn,
         'r.uuid IN (%Ls)',
         $this->uuids);
-    }
-
-    if (strlen($this->nameContains)) {
-      $where[] = qsprintf(
-        $conn,
-        'r.name LIKE %~',
-        $this->nameContains);
     }
 
     if (strlen($this->datasourceQuery)) {

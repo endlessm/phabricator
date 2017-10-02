@@ -44,7 +44,7 @@ final class DifferentialCloseConduitAPIMethod
     $revision = id(new DifferentialRevisionQuery())
       ->withIDs(array($id))
       ->setViewer($viewer)
-      ->needReviewerStatus(true)
+      ->needReviewers(true)
       ->executeOne();
     if (!$revision) {
       throw new ConduitException('ERR_NOT_FOUND');
@@ -52,8 +52,9 @@ final class DifferentialCloseConduitAPIMethod
 
     $xactions = array();
     $xactions[] = id(new DifferentialTransaction())
-      ->setTransactionType(DifferentialTransaction::TYPE_ACTION)
-      ->setNewValue(DifferentialAction::ACTION_CLOSE);
+      ->setTransactionType(
+        DifferentialRevisionCloseTransaction::TRANSACTIONTYPE)
+      ->setNewValue(true);
 
     $content_source = $request->newContentSource();
 

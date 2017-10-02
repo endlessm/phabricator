@@ -29,6 +29,17 @@ final class DifferentialRevisionRequiredActionResultBucket
     }
     $phids = array_fuse($phids);
 
+    // Before continuing, throw away any revisions which responsible users
+    // have explicitly resigned from.
+
+    // The goal is to allow users to resign from revisions they don't want to
+    // review to get these revisions off their dashboard, even if there are
+    // other project or package reviewers which they have authority over.
+    $this->filterResigned($phids);
+
+    // We also throw away draft revisions which you aren't the author of.
+    $this->filterOtherDrafts($phids);
+
     $groups = array();
 
     $groups[] = $this->newGroup()
@@ -54,6 +65,11 @@ final class DifferentialRevisionRequiredActionResultBucket
       ->setObjects($this->filterShouldUpdate($phids));
 
     $groups[] = $this->newGroup()
+      ->setName(pht('Drafts'))
+      ->setNoDataString(pht('You have no draft revisions.'))
+      ->setObjects($this->filterDrafts($phids));
+
+    $groups[] = $this->newGroup()
       ->setName(pht('Waiting on Review'))
       ->setNoDataString(pht('None of your revisions are waiting on review.'))
       ->setObjects($this->filterWaitingForReview($phids));
@@ -62,6 +78,11 @@ final class DifferentialRevisionRequiredActionResultBucket
       ->setName(pht('Waiting on Authors'))
       ->setNoDataString(pht('No revisions are waiting on author action.'))
       ->setObjects($this->filterWaitingOnAuthors($phids));
+
+    $groups[] = $this->newGroup()
+      ->setName(pht('Waiting on Other Reviewers'))
+      ->setNoDataString(pht('No revisions are waiting for other reviewers.'))
+      ->setObjects($this->filterWaitingOnOtherReviewers($phids));
 
     // Because you can apply these buckets to queries which include revisions
     // that have been closed, add an "Other" bucket if we still have stuff
@@ -121,13 +142,11 @@ final class DifferentialRevisionRequiredActionResultBucket
   }
 
   private function filterShouldLand(array $phids) {
-    $status_accepted = ArcanistDifferentialRevisionStatus::ACCEPTED;
-
     $objects = $this->getRevisionsAuthored($this->objects, $phids);
 
     $results = array();
     foreach ($objects as $key => $object) {
-      if ($object->getStatus() != $status_accepted) {
+      if (!$object->isAccepted()) {
         continue;
       }
 
@@ -140,9 +159,8 @@ final class DifferentialRevisionRequiredActionResultBucket
 
   private function filterShouldUpdate(array $phids) {
     $statuses = array(
-      ArcanistDifferentialRevisionStatus::NEEDS_REVISION,
-      ArcanistDifferentialRevisionStatus::CHANGES_PLANNED,
-      ArcanistDifferentialRevisionStatus::IN_PREPARATION,
+      DifferentialRevisionStatus::NEEDS_REVISION,
+      DifferentialRevisionStatus::CHANGES_PLANNED,
     );
     $statuses = array_fuse($statuses);
 
@@ -150,7 +168,7 @@ final class DifferentialRevisionRequiredActionResultBucket
 
     $results = array();
     foreach ($objects as $key => $object) {
-      if (empty($statuses[$object->getStatus()])) {
+      if (empty($statuses[$object->getModernRevisionStatus()])) {
         continue;
       }
 
@@ -162,13 +180,11 @@ final class DifferentialRevisionRequiredActionResultBucket
   }
 
   private function filterWaitingForReview(array $phids) {
-    $status_review = ArcanistDifferentialRevisionStatus::NEEDS_REVIEW;
-
     $objects = $this->getRevisionsAuthored($this->objects, $phids);
 
     $results = array();
     foreach ($objects as $key => $object) {
-      if ($object->getStatus() != $status_review) {
+      if (!$object->isNeedsReview()) {
         continue;
       }
 
@@ -181,10 +197,9 @@ final class DifferentialRevisionRequiredActionResultBucket
 
   private function filterWaitingOnAuthors(array $phids) {
     $statuses = array(
-      ArcanistDifferentialRevisionStatus::ACCEPTED,
-      ArcanistDifferentialRevisionStatus::NEEDS_REVISION,
-      ArcanistDifferentialRevisionStatus::CHANGES_PLANNED,
-      ArcanistDifferentialRevisionStatus::IN_PREPARATION,
+      DifferentialRevisionStatus::ACCEPTED,
+      DifferentialRevisionStatus::NEEDS_REVISION,
+      DifferentialRevisionStatus::CHANGES_PLANNED,
     );
     $statuses = array_fuse($statuses);
 
@@ -192,7 +207,76 @@ final class DifferentialRevisionRequiredActionResultBucket
 
     $results = array();
     foreach ($objects as $key => $object) {
-      if (empty($statuses[$object->getStatus()])) {
+      if (empty($statuses[$object->getModernRevisionStatus()])) {
+        continue;
+      }
+
+      $results[$key] = $object;
+      unset($this->objects[$key]);
+    }
+
+    return $results;
+  }
+
+  private function filterWaitingOnOtherReviewers(array $phids) {
+    $objects = $this->getRevisionsNotAuthored($this->objects, $phids);
+
+    $results = array();
+    foreach ($objects as $key => $object) {
+      if (!$object->isNeedsReview()) {
+        continue;
+      }
+
+      $results[$key] = $object;
+      unset($this->objects[$key]);
+    }
+
+    return $results;
+  }
+
+  private function filterResigned(array $phids) {
+    $resigned = array(
+      DifferentialReviewerStatus::STATUS_RESIGNED,
+    );
+    $resigned = array_fuse($resigned);
+
+    $objects = $this->getRevisionsNotAuthored($this->objects, $phids);
+
+    $results = array();
+    foreach ($objects as $key => $object) {
+      if (!$this->hasReviewersWithStatus($object, $phids, $resigned)) {
+        continue;
+      }
+
+      $results[$key] = $object;
+      unset($this->objects[$key]);
+    }
+
+    return $results;
+  }
+
+  private function filterOtherDrafts(array $phids) {
+    $objects = $this->getRevisionsNotAuthored($this->objects, $phids);
+
+    $results = array();
+    foreach ($objects as $key => $object) {
+      if (!$object->isDraft()) {
+        continue;
+      }
+
+      $results[$key] = $object;
+      unset($this->objects[$key]);
+    }
+
+    return $results;
+  }
+
+  private function filterDrafts(array $phids) {
+    $objects = $this->getRevisionsAuthored($this->objects, $phids);
+
+    $results = array();
+    foreach ($objects as $key => $object) {
+      if (!$object->isDraft()) {
         continue;
       }
 

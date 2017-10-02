@@ -57,7 +57,7 @@ final class DifferentialUpdateRevisionConduitAPIMethod
     $revision = id(new DifferentialRevisionQuery())
       ->setViewer($request->getUser())
       ->withIDs(array($request->getValue('id')))
-      ->needReviewerStatus(true)
+      ->needReviewers(true)
       ->needActiveDiffs(true)
       ->requireCapabilities(
         array(
@@ -69,7 +69,7 @@ final class DifferentialUpdateRevisionConduitAPIMethod
       throw new ConduitException('ERR_BAD_REVISION');
     }
 
-    if ($revision->getStatus() == ArcanistDifferentialRevisionStatus::CLOSED) {
+    if ($revision->isPublished()) {
       throw new ConduitException('ERR_CLOSED');
     }
 

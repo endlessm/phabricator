@@ -137,6 +137,15 @@ abstract class PhabricatorStorageManagementWorkflow
 
     try {
       $err = $this->doAdjustSchemata($api, $unsafe);
+
+      // Analyze tables if we're not doing a dry run and adjustments are either
+      // all clear or have minor errors like surplus tables.
+      if (!$this->dryRun) {
+        $should_analyze = (($err == 0) || ($err == 2));
+        if ($should_analyze) {
+          $this->analyzeTables($api);
+        }
+      }
     } catch (Exception $ex) {
       $lock->unlock();
       throw $ex;
@@ -1090,7 +1099,9 @@ abstract class PhabricatorStorageManagementWorkflow
             }
 
             $t_begin = microtime(true);
-            $api->applyPatch($patch);
+            if (!$is_dryrun) {
+              $api->applyPatch($patch);
+            }
             $t_end = microtime(true);
 
             $duration = ($t_end - $t_begin);
@@ -1100,7 +1111,9 @@ abstract class PhabricatorStorageManagementWorkflow
           // If we're explicitly reapplying this patch, we don't need to
           // mark it as applied.
           if (!isset($state_map[$ref_key][$key])) {
-            $api->markPatchApplied($key, ($t_end - $t_begin));
+            if (!$is_dryrun) {
+              $api->markPatchApplied($key, ($t_end - $t_begin));
+            }
             $applied_map[$ref_key][$key] = true;
           }
         }
@@ -1157,6 +1170,56 @@ abstract class PhabricatorStorageManagementWorkflow
     return PhabricatorGlobalLock::newLock($lock_name)
       ->useSpecificConnection($api->getConn(null))
       ->lock();
+  }
+
+  final protected function analyzeTables(
+    PhabricatorStorageManagementAPI $api) {
+
+    // Analyzing tables can sometimes have a significant effect on query
+    // performance, particularly for the fulltext ngrams tables. See T12819
+    // for some specific examples.
+
+    $conn = $api->getConn(null);
+
+    $patches = $this->getPatches();
+    $databases = $api->getDatabaseList($patches, true);
+
+    $this->logInfo(
+      pht('ANALYZE'),
+      pht('Analyzing tables...'));
+
+    $targets = array();
+    foreach ($databases as $database) {
+      queryfx($conn, 'USE %C', $database);
+      $tables = queryfx_all($conn, 'SHOW TABLE STATUS');
+      foreach ($tables as $table) {
+        $table_name = $table['Name'];
+
+        $targets[] = array(
+          'database' => $database,
+          'table' => $table_name,
+        );
+      }
+    }
+
+    $bar = id(new PhutilConsoleProgressBar())
+      ->setTotal(count($targets));
+    foreach ($targets as $target) {
+      queryfx(
+        $conn,
+        'ANALYZE TABLE %T.%T',
+        $target['database'],
+        $target['table']);
+
+      $bar->update(1);
+    }
+    $bar->done();
+
+    $this->logOkay(
+      pht('ANALYZED'),
+      pht(
+        'Analyzed %d table(s).',
+        count($targets)));
   }
 
 }

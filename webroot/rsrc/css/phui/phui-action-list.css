@@ -7,6 +7,11 @@
   display: none;
 }
 
+!print .phabricator-action-list-view {
+  padding: 4px 0;
+  display: none;
+}
+
 .device .phuix-dropdown-menu .phabricator-action-list-view {
   /* When an action list view appears inside a dropdown menu, don't hide it
      by default. */
@@ -69,6 +74,7 @@
   color: {$darkbluetext};
   text-overflow: ellipsis;
   overflow: hidden;
+  white-space: nowrap;
 }
 
 .action-has-icon button.phabricator-action-view-item,
@@ -111,12 +117,6 @@
   -webkit-font-smoothing: antialiased;
 }
 
-.device-desktop li.phabricator-action-view-label:hover
-  .phabricator-action-view-item {
-    background-color: #fff;
-    color: {$bluetext};
-}
-
 .phabricator-action-view + .phabricator-action-view-label {
   padding-top: 8px;
 }
@@ -156,11 +156,38 @@
   .phabricator-action-view-icon,
 .device-desktop .phabricator-action-view-disabled:hover
   button.phabricator-action-view-icon {
-  background-color: {$greybackground};
   color: {$lightgreytext};
 }
 
 .phabricator-action-view-type-divider {
   margin-top: 8px;
   border-top: 1px solid {$thinblueborder};
+}
+
+/******* Sub Menu *************************************************************/
+
+.phabricator-action-view-submenu .caret-right {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border-left-color: {$alphablue};
+}
+
+.phabricator-action-view-submenu .caret {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  border-top: 7px solid {$lightgreytext};
+}
+
+.phabricator-action-list-view .phabricator-action-view-submenu.phui-submenu-open
+  .phabricator-action-view-item {
+  background-color: rgba({$alphablue}, 0.07);
+  color: {$sky};
+  border-radius: 3px;
+}
+
+.phabricator-action-list-view .phabricator-action-view-submenu.phui-submenu-open
+  .phabricator-action-view-item .phui-icon-view {
+    color: {$sky};
 }

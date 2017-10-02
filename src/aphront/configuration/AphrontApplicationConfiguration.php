@@ -205,9 +205,8 @@ abstract class AphrontApplicationConfiguration extends Phobject {
     DarkConsoleXHProfPluginAPI::saveProfilerSample($access_log);
 
     // Add points to the rate limits for this request.
-    if (isset($_SERVER['REMOTE_ADDR'])) {
-      $user_ip = $_SERVER['REMOTE_ADDR'];
-
+    $rate_token = PhabricatorStartup::getRateLimitToken();
+    if ($rate_token !== null) {
       // The base score for a request allows users to make 30 requests per
       // minute.
       $score = (1000 / 30);
@@ -217,7 +216,7 @@ abstract class AphrontApplicationConfiguration extends Phobject {
         $score = $score / 5;
       }
 
-      PhabricatorStartup::addRateLimitScore($user_ip, $score);
+      PhabricatorStartup::addRateLimitScore($rate_token, $score);
     }
 
     if ($processing_exception) {
@@ -271,7 +270,10 @@ abstract class AphrontApplicationConfiguration extends Phobject {
       }
     } catch (Exception $ex) {
       $original_exception = $ex;
-      $response = $this->handleException($ex);
+      $response = $this->handleThrowable($ex);
+    } catch (Throwable $ex) {
+      $original_exception = $ex;
+      $response = $this->handleThrowable($ex);
     }
 
     try {
@@ -664,24 +666,24 @@ abstract class AphrontApplicationConfiguration extends Phobject {
    * This method delegates exception handling to available subclasses of
    * @{class:AphrontRequestExceptionHandler}.
    *
-   * @param Exception Exception which needs to be handled.
+   * @param Throwable Exception which needs to be handled.
    * @return wild Response or response producer, or null if no available
    *   handler can produce a response.
    * @task exception
    */
-  private function handleException(Exception $ex) {
+  private function handleThrowable($throwable) {
     $handlers = AphrontRequestExceptionHandler::getAllHandlers();
 
     $request = $this->getRequest();
     foreach ($handlers as $handler) {
-      if ($handler->canHandleRequestException($request, $ex)) {
-        $response = $handler->handleRequestException($request, $ex);
+      if ($handler->canHandleRequestThrowable($request, $throwable)) {
+        $response = $handler->handleRequestThrowable($request, $throwable);
         $this->validateErrorHandlerResponse($handler, $response);
         return $response;
       }
     }
 
-    throw $ex;
+    throw $throwable;
   }
 
   private static function newSelfCheckResponse() {

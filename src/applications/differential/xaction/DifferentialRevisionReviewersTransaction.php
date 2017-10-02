@@ -7,8 +7,8 @@ final class DifferentialRevisionReviewersTransaction
   const EDITKEY = 'reviewers';
 
   public function generateOldValue($object) {
-    $reviewers = $object->getReviewerStatus();
-    $reviewers = mpull($reviewers, 'getStatus', 'getReviewerPHID');
+    $reviewers = $object->getReviewers();
+    $reviewers = mpull($reviewers, 'getReviewerStatus', 'getReviewerPHID');
     return $reviewers;
   }
 
@@ -108,36 +108,50 @@ final class DifferentialRevisionReviewersTransaction
 
     $old = $this->generateOldValue($object);
     $new = $value;
-    $edge_type = DifferentialRevisionHasReviewerEdgeType::EDGECONST;
-
-    $editor = new PhabricatorEdgeEditor();
-
     $rem = array_diff_key($old, $new);
-    foreach ($rem as $dst_phid => $status) {
-      $editor->removeEdge($src_phid, $edge_type, $dst_phid);
+
+    $table = new DifferentialReviewer();
+    $table_name = $table->getTableName();
+    $conn = $table->establishConnection('w');
+
+    if ($rem) {
+      queryfx(
+        $conn,
+        'DELETE FROM %T WHERE revisionPHID = %s AND reviewerPHID IN (%Ls)',
+        $table_name,
+        $src_phid,
+        array_keys($rem));
     }
 
-    foreach ($new as $dst_phid => $status) {
-      $old_status = idx($old, $dst_phid);
-      if ($old_status === $status) {
-        continue;
+    if ($new) {
+      $reviewers = $table->loadAllWhere(
+        'revisionPHID = %s AND reviewerPHID IN (%Ls)',
+        $src_phid,
+        array_keys($new));
+      $reviewers = mpull($reviewers, null, 'getReviewerPHID');
+
+      foreach ($new as $dst_phid => $status) {
+        $old_status = idx($old, $dst_phid);
+        if ($old_status === $status) {
+          continue;
+        }
+
+        $reviewer = idx($reviewers, $dst_phid);
+        if (!$reviewer) {
+          $reviewer = id(new DifferentialReviewer())
+            ->setRevisionPHID($src_phid)
+            ->setReviewerPHID($dst_phid);
+        }
+
+        $reviewer->setReviewerStatus($status);
+
+        try {
+          $reviewer->save();
+        } catch (AphrontDuplicateKeyQueryException $ex) {
+          // At least for now, just ignore it if we lost a race.
+        }
       }
-
-      $data = array(
-        'data' => array(
-          'status' => $status,
-
-          // TODO: This seemes like it's buggy before the Modular Transactions
-          // changes. Figure out what's going on here? We don't have a very
-          // clean way to get the active diff ID right now.
-          'diffID' => null,
-        ),
-      );
-
-      $editor->addEdge($src_phid, $edge_type, $dst_phid, $data);
     }
-
-    $editor->save();
   }
 
   public function getTitle() {

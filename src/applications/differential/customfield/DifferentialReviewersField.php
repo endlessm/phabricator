@@ -17,7 +17,7 @@ final class DifferentialReviewersField
 
   protected function readValueFromRevision(
     DifferentialRevision $revision) {
-    return $revision->getReviewerStatus();
+    return $revision->getReviewers();
   }
 
   public function shouldAppearInPropertyView() {
@@ -43,14 +43,17 @@ final class DifferentialReviewersField
       ->setReviewers($reviewers)
       ->setHandles($handles);
 
-    // TODO: Active diff stuff.
+    $diff = $this->getActiveDiff();
+    if ($diff) {
+      $view->setActiveDiff($diff);
+    }
 
     return $view;
   }
 
   private function getUserReviewers() {
     $reviewers = array();
-    foreach ($this->getObject()->getReviewerStatus() as $reviewer) {
+    foreach ($this->getObject()->getReviewers() as $reviewer) {
       if ($reviewer->isUser()) {
         $reviewers[] = $reviewer;
       }
@@ -65,8 +68,7 @@ final class DifferentialReviewersField
   public function getWarningsForRevisionHeader(array $handles) {
     $revision = $this->getObject();
 
-    $status_needs_review = ArcanistDifferentialRevisionStatus::NEEDS_REVIEW;
-    if ($revision->getStatus() != $status_needs_review) {
+    if (!$revision->isNeedsReview()) {
       return array();
     }
 

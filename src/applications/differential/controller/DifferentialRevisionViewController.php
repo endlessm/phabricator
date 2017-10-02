@@ -17,8 +17,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $revision = id(new DifferentialRevisionQuery())
       ->withIDs(array($this->revisionID))
       ->setViewer($viewer)
-      ->needRelationships(true)
-      ->needReviewerStatus(true)
+      ->needReviewers(true)
       ->needReviewerAuthority(true)
       ->executeOne();
     if (!$revision) {
@@ -103,9 +102,12 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $this->loadDiffProperties($diffs);
     $props = $target_manual->getDiffProperties();
 
+    $subscriber_phids = PhabricatorSubscribersQuery::loadSubscribersForPHID(
+      $revision->getPHID());
+
     $object_phids = array_merge(
-      $revision->getReviewers(),
-      $revision->getCCPHIDs(),
+      $revision->getReviewerPHIDs(),
+      $subscriber_phids,
       $revision->loadCommitPHIDs(),
       array(
         $revision->getAuthorPHID(),
@@ -154,7 +156,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
         phutil_tag(
           'a',
           array(
-            'class' => 'button grey',
+            'class' => 'button button-grey',
             'href' => $request_uri
               ->alter('large', 'true')
               ->setFragment('toc'),
@@ -279,6 +281,12 @@ final class DifferentialRevisionViewController extends DifferentialController {
       ->setTitle(pht('Diff %s', $target->getID()))
       ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY);
 
+
+    $revision_id = $revision->getID();
+    $inline_list_uri = "/revision/inlines/{$revision_id}/";
+    $inline_list_uri = $this->getApplicationURI($inline_list_uri);
+    $changeset_view->setInlineListURI($inline_list_uri);
+
     if ($repository) {
       $changeset_view->setRepository($repository);
     }
@@ -318,10 +326,20 @@ final class DifferentialRevisionViewController extends DifferentialController {
       $other_view = $this->renderOtherRevisions($other_revisions);
     }
 
+    $this->buildPackageMaps($changesets);
+
     $toc_view = $this->buildTableOfContents(
       $changesets,
       $visible_changesets,
       $target->loadCoverageMap($viewer));
+
+    // Attach changesets to each reviewer so we can show which Owners package
+    // reviewers own no files.
+    foreach ($revision->getReviewers() as $reviewer) {
+      $reviewer_phid = $reviewer->getReviewerPHID();
+      $reviewer_changesets = $this->getPackageChangesets($reviewer_phid);
+      $reviewer->attachChangesets($reviewer_changesets);
+    }
 
     $tab_group = id(new PHUITabGroupView())
       ->addTab(
@@ -463,7 +481,6 @@ final class DifferentialRevisionViewController extends DifferentialController {
     }
 
     Javelin::initBehavior('differential-user-select');
-    Javelin::initBehavior('differential-keyboard-navigation');
 
     $view = id(new PHUITwoColumnView())
       ->setHeader($header)
@@ -501,11 +518,13 @@ final class DifferentialRevisionViewController extends DifferentialController {
       ->setPolicyObject($revision)
       ->setHeaderIcon('fa-cog');
 
-    $status = $revision->getStatus();
-    $status_name =
-      DifferentialRevisionStatus::renderFullDescription($status);
+    $status_tag = id(new PHUITagView())
+      ->setName($revision->getStatusDisplayName())
+      ->setIcon($revision->getStatusIcon())
+      ->setColor($revision->getStatusIconColor())
+      ->setType(PHUITagView::TYPE_SHADE);
 
-    $view->addProperty(PHUIHeaderView::PROPERTY_STATUS, $status_name);
+    $view->addProperty(PHUIHeaderView::PROPERTY_STATUS, $status_tag);
 
     return $view;
   }
@@ -606,6 +625,29 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $relationship_submenu = $relationship_list->newActionMenu();
     if ($relationship_submenu) {
       $curtain->addAction($relationship_submenu);
+    }
+
+    $repository = $revision->getRepository();
+    if ($repository && $repository->canPerformAutomation()) {
+      $revision_id = $revision->getID();
+
+      $op = new DrydockLandRepositoryOperation();
+      $barrier = $op->getBarrierToLanding($viewer, $revision);
+
+      if ($barrier) {
+        $can_land = false;
+      } else {
+        $can_land = true;
+      }
+
+      $action = id(new PhabricatorActionView())
+        ->setName(pht('Land Revision'))
+        ->setIcon('fa-fighter-jet')
+        ->setHref("/differential/revision/operation/{$revision_id}/")
+        ->setWorkflow(true)
+        ->setDisabled(!$can_land);
+
+      $curtain->addAction($action);
     }
 
     return $curtain;
@@ -776,13 +818,13 @@ final class DifferentialRevisionViewController extends DifferentialController {
 
     $query = id(new DifferentialRevisionQuery())
       ->setViewer($this->getRequest()->getUser())
-      ->withStatus(DifferentialRevisionQuery::STATUS_OPEN)
+      ->withIsOpen(true)
       ->withUpdatedEpochBetween($recent, null)
       ->setOrder(DifferentialRevisionQuery::ORDER_MODIFIED)
       ->setLimit(10)
       ->needFlags(true)
       ->needDrafts(true)
-      ->needRelationships(true);
+      ->needReviewers(true);
 
     foreach ($path_map as $path => $path_id) {
       $query->withPath($repository->getID(), $path_id);
@@ -887,15 +929,15 @@ final class DifferentialRevisionViewController extends DifferentialController {
     }
     $file_name .= 'diff';
 
-    $file = PhabricatorFile::buildFromFileDataOrHash(
-      $raw_diff,
-      array(
-        'name' => $file_name,
-        'ttl' => (60 * 60 * 24),
-        'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
-      ));
-
     $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
+      $file = PhabricatorFile::newFromFileData(
+        $raw_diff,
+        array(
+          'name' => $file_name,
+          'ttl.relative' => phutil_units('24 hours in seconds'),
+          'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
+        ));
+
       $file->attachToObject($revision->getPHID());
     unset($unguarded);
 
