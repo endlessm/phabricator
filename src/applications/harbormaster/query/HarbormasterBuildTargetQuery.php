@@ -7,6 +7,14 @@ final class HarbormasterBuildTargetQuery
   private $phids;
   private $buildPHIDs;
   private $buildGenerations;
+  private $dateCreatedMin;
+  private $dateCreatedMax;
+  private $dateStartedMin;
+  private $dateStartedMax;
+  private $dateCompletedMin;
+  private $dateCompletedMax;
+  private $statuses;
+
   private $needBuildSteps;
 
   public function withIDs(array $ids) {
@@ -29,6 +37,29 @@ final class HarbormasterBuildTargetQuery
     return $this;
   }
 
+  public function withDateCreatedBetween($min, $max) {
+    $this->dateCreatedMin = $min;
+    $this->dateCreatedMax = $max;
+    return $this;
+  }
+
+  public function withDateStartedBetween($min, $max) {
+    $this->dateStartedMin = $min;
+    $this->dateStartedMax = $max;
+    return $this;
+  }
+
+  public function withDateCompletedBetween($min, $max) {
+    $this->dateCompletedMin = $min;
+    $this->dateCompletedMax = $max;
+    return $this;
+  }
+
+  public function withTargetStatuses(array $statuses) {
+    $this->statuses = $statuses;
+    return $this;
+  }
+
   public function needBuildSteps($need_build_steps) {
     $this->needBuildSteps = $need_build_steps;
     return $this;
@@ -36,10 +67,6 @@ final class HarbormasterBuildTargetQuery
 
   public function newResultObject() {
     return new HarbormasterBuildTarget();
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
@@ -71,6 +98,55 @@ final class HarbormasterBuildTargetQuery
         $conn,
         'buildGeneration in (%Ld)',
         $this->buildGenerations);
+    }
+
+    if ($this->dateCreatedMin !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateCreated >= %d',
+        $this->dateCreatedMin);
+    }
+
+    if ($this->dateCreatedMax !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateCreated <= %d',
+        $this->dateCreatedMax);
+    }
+
+    if ($this->dateStartedMin !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateStarted >= %d',
+        $this->dateStartedMin);
+    }
+
+    if ($this->dateStartedMax !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateStarted <= %d',
+        $this->dateStartedMax);
+    }
+
+    if ($this->dateCompletedMin !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateCompleted >= %d',
+        $this->dateCompletedMin);
+    }
+
+    if ($this->dateCompletedMax !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateCompleted <= %d',
+        $this->dateCompletedMax);
+    }
+
+    if ($this->statuses !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'targetStatus IN (%Ls)',
+        $this->statuses);
     }
 
     return $where;

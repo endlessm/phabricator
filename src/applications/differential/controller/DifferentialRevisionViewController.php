@@ -1,11 +1,43 @@
 <?php
 
-final class DifferentialRevisionViewController extends DifferentialController {
+final class DifferentialRevisionViewController
+  extends DifferentialController {
 
   private $revisionID;
+  private $changesetCount;
+  private $hiddenChangesets;
+  private $warnings = array();
 
   public function shouldAllowPublic() {
     return true;
+  }
+
+  public function isLargeDiff() {
+    return ($this->getChangesetCount() > $this->getLargeDiffLimit());
+  }
+
+  public function isVeryLargeDiff() {
+    return ($this->getChangesetCount() > $this->getVeryLargeDiffLimit());
+  }
+
+  public function getLargeDiffLimit() {
+    return 100;
+  }
+
+  public function getVeryLargeDiffLimit() {
+    return 1000;
+  }
+
+  public function getChangesetCount() {
+    if ($this->changesetCount === null) {
+      throw new PhutilInvalidStateException('setChangesetCount');
+    }
+    return $this->changesetCount;
+  }
+
+  public function setChangesetCount($count) {
+    $this->changesetCount = $count;
+    return $this;
   }
 
   public function handleRequest(AphrontRequest $request) {
@@ -19,6 +51,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
       ->setViewer($viewer)
       ->needReviewers(true)
       ->needReviewerAuthority(true)
+      ->needCommitPHIDs(true)
       ->executeOne();
     if (!$revision) {
       return new Aphront404Response();
@@ -37,9 +70,17 @@ final class DifferentialRevisionViewController extends DifferentialController {
 
     $revision->attachActiveDiff(last($diffs));
 
-    $diff_vs = $request->getInt('vs');
-    $target_id = $request->getInt('id');
-    $target = idx($diffs, $target_id, end($diffs));
+    $diff_vs = $this->getOldDiffID($revision, $diffs);
+    if ($diff_vs instanceof AphrontResponse) {
+      return $diff_vs;
+    }
+
+    $target_id = $this->getNewDiffID($revision, $diffs);
+    if ($target_id instanceof AphrontResponse) {
+      return $target_id;
+    }
+
+    $target = $diffs[$target_id];
 
     $target_manual = $target;
     if (!$target_id) {
@@ -48,10 +89,6 @@ final class DifferentialRevisionViewController extends DifferentialController {
           $target_manual = $diff;
         }
       }
-    }
-
-    if (empty($diffs[$diff_vs])) {
-      $diff_vs = null;
     }
 
     $repository = null;
@@ -72,6 +109,8 @@ final class DifferentialRevisionViewController extends DifferentialController {
         $target,
         idx($diffs, $diff_vs),
         $repository);
+
+    $this->setChangesetCount(count($rendering_references));
 
     if ($request->getExists('download')) {
       return $this->buildRawDiffResponse(
@@ -108,7 +147,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $object_phids = array_merge(
       $revision->getReviewerPHIDs(),
       $subscriber_phids,
-      $revision->loadCommitPHIDs(),
+      $revision->getCommitPHIDs(),
       array(
         $revision->getAuthorPHID(),
         $viewer->getPHID(),
@@ -137,57 +176,115 @@ final class DifferentialRevisionViewController extends DifferentialController {
     }
 
     $handles = $this->loadViewerHandles($object_phids);
+    $warnings = $this->warnings;
 
     $request_uri = $request->getRequestURI();
 
-    $limit = 100;
     $large = $request->getStr('large');
-    if (count($changesets) > $limit && !$large) {
-      $count = count($changesets);
-      $warning = new PHUIInfoView();
-      $warning->setTitle(pht('Very Large Diff'));
-      $warning->setSeverity(PHUIInfoView::SEVERITY_WARNING);
-      $warning->appendChild(hsprintf(
-        '%s <strong>%s</strong>',
-        pht(
-          'This diff is very large and affects %s files. '.
-          'You may load each file individually or ',
-          new PhutilNumber($count)),
-        phutil_tag(
-          'a',
-          array(
-            'class' => 'button button-grey',
-            'href' => $request_uri
-              ->alter('large', 'true')
-              ->setFragment('toc'),
-          ),
-          pht('Show All Files Inline'))));
-      $warning = $warning->render();
 
+    $large_warning =
+      ($this->isLargeDiff()) &&
+      (!$this->isVeryLargeDiff()) &&
+      (!$large);
+
+    if ($large_warning) {
+      $count = $this->getChangesetCount();
+
+      $expand_uri = $request_uri
+        ->alter('large', 'true')
+        ->setFragment('toc');
+
+      $message = array(
+        pht(
+          'This large diff affects %s files. Files without inline '.
+          'comments have been collapsed.',
+          new PhutilNumber($count)),
+        ' ',
+        phutil_tag(
+          'strong',
+          array(),
+          phutil_tag(
+            'a',
+            array(
+              'href' => $expand_uri,
+            ),
+            pht('Expand All Files'))),
+      );
+
+      $warnings[] = id(new PHUIInfoView())
+        ->setTitle(pht('Large Diff'))
+        ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
+        ->appendChild($message);
+
+      $folded_changesets = $changesets;
+    } else {
+      $folded_changesets = array();
+    }
+
+    // Don't hide or fold changesets which have inline comments.
+    $hidden_changesets = $this->hiddenChangesets;
+    if ($hidden_changesets || $folded_changesets) {
       $old = array_select_keys($changesets, $old_ids);
       $new = array_select_keys($changesets, $new_ids);
 
-      $query = id(new DifferentialInlineCommentQuery())
+      $inlines = id(new DifferentialDiffInlineCommentQuery())
         ->setViewer($viewer)
-        ->needHidden(true)
-        ->withRevisionPHIDs(array($revision->getPHID()));
-      $inlines = $query->execute();
-      $inlines = $query->adjustInlinesForChangesets(
-        $inlines,
-        $old,
-        $new,
-        $revision);
+        ->withRevisionPHIDs(array($revision->getPHID()))
+        ->withPublishableComments(true)
+        ->withPublishedComments(true)
+        ->execute();
 
-      $visible_changesets = array();
+      $inlines = mpull($inlines, 'newInlineCommentObject');
+
+      $inlines = id(new PhabricatorInlineCommentAdjustmentEngine())
+        ->setViewer($viewer)
+        ->setRevision($revision)
+        ->setOldChangesets($old)
+        ->setNewChangesets($new)
+        ->setInlines($inlines)
+        ->execute();
+
       foreach ($inlines as $inline) {
         $changeset_id = $inline->getChangesetID();
-        if (isset($changesets[$changeset_id])) {
-          $visible_changesets[$changeset_id] = $changesets[$changeset_id];
+        if (!isset($changesets[$changeset_id])) {
+          continue;
         }
+
+        unset($hidden_changesets[$changeset_id]);
+        unset($folded_changesets[$changeset_id]);
       }
-    } else {
-      $warning = null;
-      $visible_changesets = $changesets;
+    }
+
+    // If we would hide only one changeset, don't hide anything. The notice
+    // we'd render about it is about the same size as the changeset.
+    if (count($hidden_changesets) < 2) {
+      $hidden_changesets = array();
+    }
+
+    // Update the set of hidden changesets, since we may have just un-hidden
+    // some of them.
+    if ($hidden_changesets) {
+      $warnings[] = id(new PHUIInfoView())
+        ->setTitle(pht('Showing Only Differences'))
+        ->setSeverity(PHUIInfoView::SEVERITY_NOTICE)
+        ->appendChild(
+          pht(
+            'This revision modifies %s more files that are hidden because '.
+            'they were not modified between selected diffs and they have no '.
+            'inline comments.',
+            phutil_count($hidden_changesets)));
+    }
+
+    // Compute the unfolded changesets. By default, everything is unfolded.
+    $unfolded_changesets = $changesets;
+    foreach ($folded_changesets as $changeset_id => $changeset) {
+      unset($unfolded_changesets[$changeset_id]);
+    }
+
+    // Throw away any hidden changesets.
+    foreach ($hidden_changesets as $changeset_id => $changeset) {
+      unset($changesets[$changeset_id]);
+      unset($unfolded_changesets[$changeset_id]);
     }
 
     $commit_hashes = mpull($diffs, 'getSourceControlBaseRevision');
@@ -215,15 +312,11 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $details = $this->buildDetails($revision, $field_list);
     $curtain = $this->buildCurtain($revision);
 
-    $whitespace = $request->getStr(
-      'whitespace',
-      DifferentialChangesetParser::WHITESPACE_IGNORE_MOST);
-
     $repository = $revision->getRepository();
     if ($repository) {
       $symbol_indexes = $this->buildSymbolIndexes(
         $repository,
-        $visible_changesets);
+        $unfolded_changesets);
     } else {
       $symbol_indexes = array();
     }
@@ -265,35 +358,51 @@ final class DifferentialRevisionViewController extends DifferentialController {
 
     $timeline->setQuoteRef($revision->getMonogram());
 
-    $changeset_view = id(new DifferentialChangesetListView())
-      ->setChangesets($changesets)
-      ->setVisibleChangesets($visible_changesets)
-      ->setStandaloneURI('/differential/changeset/')
-      ->setRawFileURIs(
-        '/differential/changeset/?view=old',
-        '/differential/changeset/?view=new')
-      ->setUser($viewer)
-      ->setDiff($target)
-      ->setRenderingReferences($rendering_references)
-      ->setVsMap($vs_map)
-      ->setWhitespace($whitespace)
-      ->setSymbolIndexes($symbol_indexes)
-      ->setTitle(pht('Diff %s', $target->getID()))
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY);
+    if ($this->isVeryLargeDiff()) {
+      $messages = array();
 
+      $messages[] = pht(
+        'This very large diff affects more than %s files. Use the %s to '.
+        'browse changes.',
+        new PhutilNumber($this->getVeryLargeDiffLimit()),
+        phutil_tag(
+          'a',
+          array(
+            'href' => '/differential/diff/'.$target->getID().'/changesets/',
+          ),
+          phutil_tag('strong', array(), pht('Changeset List'))));
 
-    $revision_id = $revision->getID();
-    $inline_list_uri = "/revision/inlines/{$revision_id}/";
-    $inline_list_uri = $this->getApplicationURI($inline_list_uri);
-    $changeset_view->setInlineListURI($inline_list_uri);
+      $changeset_view = id(new PHUIInfoView())
+        ->setErrors($messages);
+    } else {
+      $changeset_view = id(new DifferentialChangesetListView())
+        ->setChangesets($changesets)
+        ->setVisibleChangesets($unfolded_changesets)
+        ->setStandaloneURI('/differential/changeset/')
+        ->setRawFileURIs(
+          '/differential/changeset/?view=old',
+          '/differential/changeset/?view=new')
+        ->setUser($viewer)
+        ->setDiff($target)
+        ->setRenderingReferences($rendering_references)
+        ->setVsMap($vs_map)
+        ->setSymbolIndexes($symbol_indexes)
+        ->setTitle(pht('Diff %s', $target->getID()))
+        ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY);
 
-    if ($repository) {
-      $changeset_view->setRepository($repository);
-    }
+      $revision_id = $revision->getID();
+      $inline_list_uri = "/revision/inlines/{$revision_id}/";
+      $inline_list_uri = $this->getApplicationURI($inline_list_uri);
+      $changeset_view->setInlineListURI($inline_list_uri);
 
-    if (!$viewer_is_anonymous) {
-      $changeset_view->setInlineCommentControllerURI(
-        '/differential/comment/inline/edit/'.$revision->getID().'/');
+      if ($repository) {
+        $changeset_view->setRepository($repository);
+      }
+
+      if (!$viewer_is_anonymous) {
+        $changeset_view->setInlineCommentControllerURI(
+          '/differential/comment/inline/edit/'.$revision->getID().'/');
+      }
     }
 
     $broken_diffs = $this->loadHistoryDiffStatus($diffs);
@@ -304,7 +413,6 @@ final class DifferentialRevisionViewController extends DifferentialController {
       ->setDiffUnitStatuses($broken_diffs)
       ->setSelectedVersusDiffID($diff_vs)
       ->setSelectedDiffID($target->getID())
-      ->setSelectedWhitespace($whitespace)
       ->setCommitsForLinks($commits_for_links);
 
     $local_table = id(new DifferentialLocalCommitsView())
@@ -312,7 +420,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
       ->setLocalCommits(idx($props, 'local:commits'))
       ->setCommitsForLinks($commits_for_links);
 
-    if ($repository) {
+    if ($repository && !$this->isVeryLargeDiff()) {
       $other_revisions = $this->loadOtherRevisions(
         $changesets,
         $target,
@@ -326,37 +434,75 @@ final class DifferentialRevisionViewController extends DifferentialController {
       $other_view = $this->renderOtherRevisions($other_revisions);
     }
 
-    $this->buildPackageMaps($changesets);
+    if ($this->isVeryLargeDiff()) {
+      $toc_view = null;
 
-    $toc_view = $this->buildTableOfContents(
-      $changesets,
-      $visible_changesets,
-      $target->loadCoverageMap($viewer));
+      // When rendering a "very large" diff, we skip computation of owners
+      // that own no files because it is significantly expensive and not very
+      // valuable.
+      foreach ($revision->getReviewers() as $reviewer) {
+        // Give each reviewer a dummy nonempty value so the UI does not render
+        // the "(Owns No Changed Paths)" note. If that behavior becomes more
+        // sophisticated in the future, this behavior might also need to.
+        $reviewer->attachChangesets($changesets);
+      }
+    } else {
+      $this->buildPackageMaps($changesets);
 
-    // Attach changesets to each reviewer so we can show which Owners package
-    // reviewers own no files.
-    foreach ($revision->getReviewers() as $reviewer) {
-      $reviewer_phid = $reviewer->getReviewerPHID();
-      $reviewer_changesets = $this->getPackageChangesets($reviewer_phid);
-      $reviewer->attachChangesets($reviewer_changesets);
+      $toc_view = $this->buildTableOfContents(
+        $changesets,
+        $unfolded_changesets,
+        $target->loadCoverageMap($viewer));
+
+      // Attach changesets to each reviewer so we can show which Owners package
+      // reviewers own no files.
+      foreach ($revision->getReviewers() as $reviewer) {
+        $reviewer_phid = $reviewer->getReviewerPHID();
+        $reviewer_changesets = $this->getPackageChangesets($reviewer_phid);
+        $reviewer->attachChangesets($reviewer_changesets);
+      }
+
+      $authority_packages = $this->getAuthorityPackages();
+      foreach ($changesets as $changeset) {
+        $changeset_packages = $this->getChangesetPackages($changeset);
+
+        $changeset
+          ->setAuthorityPackages($authority_packages)
+          ->setChangesetPackages($changeset_packages);
+      }
     }
 
-    $tab_group = id(new PHUITabGroupView())
-      ->addTab(
+    $tab_group = new PHUITabGroupView();
+
+    if ($toc_view) {
+      $tab_group->addTab(
         id(new PHUITabView())
           ->setName(pht('Files'))
           ->setKey('files')
-          ->appendChild($toc_view))
-      ->addTab(
-        id(new PHUITabView())
-          ->setName(pht('History'))
-          ->setKey('history')
-          ->appendChild($history))
-      ->addTab(
-        id(new PHUITabView())
-          ->setName(pht('Commits'))
-          ->setKey('commits')
-          ->appendChild($local_table));
+          ->appendChild($toc_view));
+    }
+
+    $tab_group->addTab(
+      id(new PHUITabView())
+        ->setName(pht('History'))
+        ->setKey('history')
+        ->appendChild($history));
+
+    $filetree = id(new DifferentialFileTreeEngine())
+      ->setViewer($viewer);
+    $filetree_collapsed = !$filetree->getIsVisible();
+
+    // See PHI811. If the viewer has the file tree on, the files tab with the
+    // table of contents is redundant, so default to the "History" tab instead.
+    if (!$filetree_collapsed) {
+      $tab_group->selectTab('history');
+    }
+
+    $tab_group->addTab(
+      id(new PHUITabView())
+        ->setName(pht('Commits'))
+        ->setKey('commits')
+        ->appendChild($local_table));
 
     $stack_graph = id(new DifferentialRevisionGraph())
       ->setViewer($viewer)
@@ -364,6 +510,11 @@ final class DifferentialRevisionViewController extends DifferentialController {
       ->setLoadEntireGraph(true)
       ->loadGraph();
     if (!$stack_graph->isEmpty()) {
+      // See PHI1900. The graph UI element now tries to figure out the correct
+      // height automatically, but currently can't in this case because the
+      // element is not visible when the page loads. Set an explicit height.
+      $stack_graph->setHeight(34);
+
       $stack_table = $stack_graph->newGraphTable();
 
       $parent_type = DifferentialRevisionDependsOnRevisionEdgeType::EDGECONST;
@@ -399,8 +550,18 @@ final class DifferentialRevisionViewController extends DifferentialController {
           ->appendChild($other_view));
     }
 
+    $view_button = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setText(pht('Changeset List'))
+      ->setHref('/differential/diff/'.$target->getID().'/changesets/')
+      ->setIcon('fa-align-left');
+
+    $tab_header = id(new PHUIHeaderView())
+      ->setHeader(pht('Revision Contents'))
+      ->addActionLink($view_button);
+
     $tab_view = id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Revision Contents'))
+      ->setHeader($tab_header)
       ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->addTabGroup($tab_group);
 
@@ -429,7 +590,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
 
       $footer[] = array(
         $anchor,
-        $warning,
+        $warnings,
         $tab_view,
         $changeset_view,
       );
@@ -464,23 +625,9 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $crumbs->addTextCrumb($monogram);
     $crumbs->setBorder(true);
 
-    $filetree_on = $viewer->compareUserSetting(
-      PhabricatorShowFiletreeSetting::SETTINGKEY,
-      PhabricatorShowFiletreeSetting::VALUE_ENABLE_FILETREE);
-
-    $nav = null;
-    if ($filetree_on) {
-      $collapsed_key = PhabricatorFiletreeVisibleSetting::SETTINGKEY;
-      $collapsed_value = $viewer->getUserSetting($collapsed_key);
-
-      $nav = id(new DifferentialChangesetFileTreeSideNavBuilder())
-        ->setTitle($monogram)
-        ->setBaseURI(new PhutilURI($revision->getURI()))
-        ->setCollapsed((bool)$collapsed_value)
-        ->build($changesets);
-    }
-
-    Javelin::initBehavior('differential-user-select');
+    $filetree
+      ->setChangesets($changesets)
+      ->setDisabled($this->isVeryLargeDiff());
 
     $view = id(new PHUITwoColumnView())
       ->setHeader($header)
@@ -498,15 +645,21 @@ final class DifferentialRevisionViewController extends DifferentialController {
         ))
       ->setFooter($footer);
 
-    $page =  $this->newPage()
-      ->setTitle($monogram.' '.$revision->getTitle())
-      ->setCrumbs($crumbs)
-      ->setPageObjectPHIDs(array($revision->getPHID()))
-      ->appendChild($view);
+    $main_content = array(
+      $crumbs,
+      $view,
+    );
 
-    if ($nav) {
-      $page->setNavigation($nav);
+    $main_content = $filetree->newView($main_content);
+
+    if (!$filetree->getDisabled()) {
+      $changeset_view->setFormationView($main_content);
     }
+
+    $page = $this->newPage()
+      ->setTitle($monogram.' '.$revision->getTitle())
+      ->setPageObjectPHIDs(array($revision->getPHID()))
+      ->appendChild($main_content);
 
     return $page;
   }
@@ -521,10 +674,26 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $status_tag = id(new PHUITagView())
       ->setName($revision->getStatusDisplayName())
       ->setIcon($revision->getStatusIcon())
-      ->setColor($revision->getStatusIconColor())
+      ->setColor($revision->getStatusTagColor())
       ->setType(PHUITagView::TYPE_SHADE);
 
     $view->addProperty(PHUIHeaderView::PROPERTY_STATUS, $status_tag);
+
+    // If the revision is in a status other than "Draft", but not broadcasting,
+    // add an additional "Draft" tag to the header to make it clear that this
+    // revision hasn't promoted yet.
+    if (!$revision->getShouldBroadcast() && !$revision->isDraft()) {
+      $draft_status = DifferentialRevisionStatus::newForStatus(
+        DifferentialRevisionStatus::DRAFT);
+
+      $draft_tag = id(new PHUITagView())
+        ->setName($draft_status->getDisplayName())
+        ->setIcon($draft_status->getIcon())
+        ->setColor($draft_status->getTagColor())
+        ->setType(PHUITagView::TYPE_SHADE);
+
+      $view->addTag($draft_tag);
+    }
 
     return $view;
   }
@@ -696,6 +865,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
     DifferentialDiff $target,
     DifferentialDiff $diff_vs = null,
     PhabricatorRepository $repository = null) {
+    $viewer = $this->getViewer();
 
     $load_diffs = array($target);
     if ($diff_vs) {
@@ -703,7 +873,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
     }
 
     $raw_changesets = id(new DifferentialChangesetQuery())
-      ->setViewer($this->getRequest()->getUser())
+      ->setViewer($viewer)
       ->withDiffs($load_diffs)
       ->execute();
     $changeset_groups = mgroup($raw_changesets, 'getDiffID');
@@ -711,17 +881,19 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $changesets = idx($changeset_groups, $target->getID(), array());
     $changesets = mpull($changesets, null, 'getID');
 
-    $refs          = array();
-    $vs_map        = array();
+    $refs = array();
+    $vs_map = array();
     $vs_changesets = array();
+    $must_compare = array();
     if ($diff_vs) {
-      $vs_id                  = $diff_vs->getID();
+      $vs_id = $diff_vs->getID();
       $vs_changesets_path_map = array();
       foreach (idx($changeset_groups, $vs_id, array()) as $changeset) {
         $path = $changeset->getAbsoluteRepositoryPath($repository, $diff_vs);
         $vs_changesets_path_map[$path] = $changeset;
         $vs_changesets[$changeset->getID()] = $changeset;
       }
+
       foreach ($changesets as $key => $changeset) {
         $path = $changeset->getAbsoluteRepositoryPath($repository, $target);
         if (isset($vs_changesets_path_map[$path])) {
@@ -730,15 +902,20 @@ final class DifferentialRevisionViewController extends DifferentialController {
           $refs[$changeset->getID()] =
             $changeset->getID().'/'.$vs_changesets_path_map[$path]->getID();
           unset($vs_changesets_path_map[$path]);
+
+          $must_compare[] = $changeset->getID();
+
         } else {
           $refs[$changeset->getID()] = $changeset->getID();
         }
       }
+
       foreach ($vs_changesets_path_map as $path => $changeset) {
         $changesets[$changeset->getID()] = $changeset;
-        $vs_map[$changeset->getID()]     = -1;
-        $refs[$changeset->getID()]       = $changeset->getID().'/-1';
+        $vs_map[$changeset->getID()] = -1;
+        $refs[$changeset->getID()] = $changeset->getID().'/-1';
       }
+
     } else {
       foreach ($changesets as $changeset) {
         $refs[$changeset->getID()] = $changeset->getID();
@@ -747,13 +924,25 @@ final class DifferentialRevisionViewController extends DifferentialController {
 
     $changesets = msort($changesets, 'getSortKey');
 
+    // See T13137. When displaying the diff between two updates, hide any
+    // changesets which haven't actually changed.
+    $this->hiddenChangesets = array();
+    foreach ($must_compare as $changeset_id) {
+      $changeset = $changesets[$changeset_id];
+      $vs_changeset = $vs_changesets[$vs_map[$changeset_id]];
+
+      if ($changeset->hasSameEffectAs($vs_changeset)) {
+        $this->hiddenChangesets[$changeset_id] = $changesets[$changeset_id];
+      }
+    }
+
     return array($changesets, $vs_map, $vs_changesets, $refs);
   }
 
   private function buildSymbolIndexes(
     PhabricatorRepository $repository,
-    array $visible_changesets) {
-    assert_instances_of($visible_changesets, 'DifferentialChangeset');
+    array $unfolded_changesets) {
+    assert_instances_of($unfolded_changesets, 'DifferentialChangeset');
 
     $engine = PhabricatorSyntaxHighlighter::newEngine();
 
@@ -778,7 +967,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
       $sources);
 
     $indexed_langs = array_fill_keys($langs, true);
-    foreach ($visible_changesets as $key => $changeset) {
+    foreach ($unfolded_changesets as $key => $changeset) {
       $lang = $engine->getLanguageFromFilename($changeset->getFilename());
       if (empty($indexed_langs) || isset($indexed_langs[$lang])) {
         $symbol_indexes[$key] = array(
@@ -797,6 +986,8 @@ final class DifferentialRevisionViewController extends DifferentialController {
     PhabricatorRepository $repository) {
     assert_instances_of($changesets, 'DifferentialChangeset');
 
+    $viewer = $this->getViewer();
+
     $paths = array();
     foreach ($changesets as $changeset) {
       $paths[] = $changeset->getAbsoluteRepositoryPath(
@@ -808,34 +999,30 @@ final class DifferentialRevisionViewController extends DifferentialController {
       return array();
     }
 
-    $path_map = id(new DiffusionPathIDQuery($paths))->loadPathIDs();
-
-    if (!$path_map) {
-      return array();
-    }
-
     $recent = (PhabricatorTime::getNow() - phutil_units('30 days in seconds'));
 
     $query = id(new DifferentialRevisionQuery())
-      ->setViewer($this->getRequest()->getUser())
+      ->setViewer($viewer)
       ->withIsOpen(true)
       ->withUpdatedEpochBetween($recent, null)
       ->setOrder(DifferentialRevisionQuery::ORDER_MODIFIED)
       ->setLimit(10)
       ->needFlags(true)
       ->needDrafts(true)
-      ->needReviewers(true);
-
-    foreach ($path_map as $path => $path_id) {
-      $query->withPath($repository->getID(), $path_id);
-    }
+      ->needReviewers(true)
+      ->withRepositoryPHIDs(
+        array(
+          $repository->getPHID(),
+        ))
+      ->withPaths($paths);
 
     $results = $query->execute();
 
     // Strip out *this* revision.
     foreach ($results as $key => $result) {
       if ($result->getID() == $this->revisionID) {
-        unset($results[$key]);
+       unset($results[$key]);
+       break;
       }
     }
 
@@ -849,26 +1036,14 @@ final class DifferentialRevisionViewController extends DifferentialController {
     $header = id(new PHUIHeaderView())
       ->setHeader(pht('Recent Similar Revisions'));
 
-    $view = id(new DifferentialRevisionListView())
+    return id(new DifferentialRevisionListView())
+      ->setViewer($viewer)
       ->setRevisions($revisions)
       ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->setNoBox(true)
-      ->setUser($viewer);
-
-    $phids = $view->getRequiredHandlePHIDs();
-    $handles = $this->loadViewerHandles($phids);
-    $view->setHandles($handles);
-
-    return $view;
+      ->setNoBox(true);
   }
 
 
-  /**
-   * Note this code is somewhat similar to the buildPatch method in
-   * @{class:DifferentialReviewRequestMail}.
-   *
-   * @return @{class:AphrontRedirectResponse}
-   */
   private function buildRawDiffResponse(
     DifferentialRevision $revision,
     array $changesets,
@@ -918,10 +1093,11 @@ final class DifferentialRevisionViewController extends DifferentialController {
     // this ends up being something like
     //   D123.diff
     // or the verbose
-    //   D123.vs123.id123.whitespaceignore-all.diff
+    //   D123.vs123.id123.highlightjs.diff
     // lame but nice to include these options
     $file_name = ltrim($request_uri->getPath(), '/').'.';
-    foreach ($request_uri->getQueryParams() as $key => $value) {
+    foreach ($request_uri->getQueryParamsAsPairList() as $pair) {
+      list($key, $value) = $pair;
       if ($key == 'download') {
         continue;
       }
@@ -929,15 +1105,17 @@ final class DifferentialRevisionViewController extends DifferentialController {
     }
     $file_name .= 'diff';
 
-    $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-      $file = PhabricatorFile::newFromFileData(
-        $raw_diff,
-        array(
-          'name' => $file_name,
-          'ttl.relative' => phutil_units('24 hours in seconds'),
-          'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,
-        ));
+    $iterator = new ArrayIterator(array($raw_diff));
 
+    $source = id(new PhabricatorIteratorFileUploadSource())
+      ->setName($file_name)
+      ->setMIMEType('text/plain')
+      ->setRelativeTTL(phutil_units('24 hours in seconds'))
+      ->setViewPolicy(PhabricatorPolicies::POLICY_NOONE)
+      ->setIterator($iterator);
+
+    $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
+      $file = $source->uploadFile();
       $file->attachToObject($revision->getPHID());
     unset($unguarded);
 
@@ -1104,7 +1282,7 @@ final class DifferentialRevisionViewController extends DifferentialController {
   }
 
   private function buildUnitMessagesView(
-    $diff,
+    DifferentialDiff $diff,
     DifferentialRevision $revision) {
     $viewer = $this->getViewer();
 
@@ -1132,18 +1310,141 @@ final class DifferentialRevisionViewController extends DifferentialController {
       return null;
     }
 
-    $excuse = null;
-    if ($diff->hasDiffProperty('arc:unit-excuse')) {
-      $excuse = $diff->getProperty('arc:unit-excuse');
-    }
-
     return id(new HarbormasterUnitSummaryView())
-      ->setUser($viewer)
-      ->setExcuse($excuse)
+      ->setViewer($viewer)
       ->setBuildable($diff->getBuildable())
       ->setUnitMessages($diff->getUnitMessages())
       ->setLimit(5)
       ->setShowViewAll(true);
+  }
+
+  private function getOldDiffID(DifferentialRevision $revision, array $diffs) {
+    assert_instances_of($diffs, 'DifferentialDiff');
+    $request = $this->getRequest();
+
+    $diffs = mpull($diffs, null, 'getID');
+
+    $is_new = ($request->getURIData('filter') === 'new');
+    $old_id = $request->getInt('vs');
+
+    // This is ambiguous, so just 404 rather than trying to figure out what
+    // the user expects.
+    if ($is_new && $old_id) {
+      return new Aphront404Response();
+    }
+
+    if ($is_new) {
+      $viewer = $this->getViewer();
+
+      $xactions = id(new DifferentialTransactionQuery())
+        ->setViewer($viewer)
+        ->withObjectPHIDs(array($revision->getPHID()))
+        ->withAuthorPHIDs(array($viewer->getPHID()))
+        ->setOrder('newest')
+        ->setLimit(1)
+        ->execute();
+
+      if (!$xactions) {
+        $this->warnings[] = id(new PHUIInfoView())
+          ->setTitle(pht('No Actions'))
+          ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
+          ->appendChild(
+            pht(
+              'Showing all changes because you have never taken an '.
+              'action on this revision.'));
+      } else {
+        $xaction = head($xactions);
+
+        // Find the transactions which updated this revision. We want to
+        // figure out which diff was active when you last took an action.
+        $updates = id(new DifferentialTransactionQuery())
+          ->setViewer($viewer)
+          ->withObjectPHIDs(array($revision->getPHID()))
+          ->withTransactionTypes(
+            array(
+              DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE,
+            ))
+          ->setOrder('oldest')
+          ->execute();
+
+        // Sort the diffs into two buckets: those older than your last action
+        // and those newer than your last action.
+        $older = array();
+        $newer = array();
+        foreach ($updates as $update) {
+          // If you updated the revision with "arc diff", try to count that
+          // update as "before your last action".
+          if ($update->getDateCreated() <= $xaction->getDateCreated()) {
+            $older[] = $update->getNewValue();
+          } else {
+            $newer[] = $update->getNewValue();
+          }
+        }
+
+        if (!$newer) {
+          $this->warnings[] = id(new PHUIInfoView())
+            ->setTitle(pht('No Recent Updates'))
+            ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
+            ->appendChild(
+              pht(
+                'Showing all changes because the diff for this revision '.
+                'has not been updated since your last action.'));
+        } else {
+          $older = array_fuse($older);
+
+          // Find the most recent diff from before the last action.
+          $old = null;
+          foreach ($diffs as $diff) {
+            if (!isset($older[$diff->getPHID()])) {
+              break;
+            }
+
+            $old = $diff;
+          }
+
+          // It's possible we may not find such a diff: transactions may have
+          // been removed from the database, for example. If we miss, just
+          // fail into some reasonable state since 404'ing would be perplexing.
+          if ($old) {
+            $this->warnings[] = id(new PHUIInfoView())
+              ->setTitle(pht('New Changes Shown'))
+              ->setSeverity(PHUIInfoView::SEVERITY_NOTICE)
+              ->appendChild(
+                pht(
+                  'Showing changes since the last action you took on this '.
+                  'revision.'));
+
+            $old_id = $old->getID();
+          }
+        }
+      }
+    }
+
+    if (isset($diffs[$old_id])) {
+      return $old_id;
+    }
+
+    return null;
+  }
+
+  private function getNewDiffID(DifferentialRevision $revision, array $diffs) {
+    assert_instances_of($diffs, 'DifferentialDiff');
+    $request = $this->getRequest();
+
+    $diffs = mpull($diffs, null, 'getID');
+
+    $is_new = ($request->getURIData('filter') === 'new');
+    $new_id = $request->getInt('id');
+
+    if ($is_new && $new_id) {
+      return new Aphront404Response();
+    }
+
+    if (isset($diffs[$new_id])) {
+      return $new_id;
+    }
+
+    return (int)last_key($diffs);
   }
 
 }

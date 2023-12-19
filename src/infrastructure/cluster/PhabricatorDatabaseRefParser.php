@@ -90,7 +90,7 @@ final class PhabricatorDatabaseRefParser
         if (!is_array($partition)) {
           throw new Exception(
             pht(
-              'Phabricator is configured with multiple master databases, '.
+              'This server is configured with multiple master databases, '.
               'but master "%s" is missing a "partition" configuration key to '.
               'define application partitioning.',
               $ref->getRefKey()));
@@ -205,6 +205,8 @@ final class PhabricatorDatabaseRefParser
             'Database "%s" is configured as a replica and specifies a '.
             'master ("%s"), but that master is not a valid master. Valid '.
             'masters are: %s.',
+            $ref->getRefKey(),
+            $master_key,
             implode(', ', $master_keys)));
       }
 

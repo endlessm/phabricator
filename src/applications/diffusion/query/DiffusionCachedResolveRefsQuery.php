@@ -9,7 +9,7 @@
  * low-level query can.
  *
  * This class can resolve the most common refs (commits, branches, tags) and
- * can do so cheapy (by examining the database, without needing to make calls
+ * can do so cheaply (by examining the database, without needing to make calls
  * to the VCS or the service host).
  */
 final class DiffusionCachedResolveRefsQuery
@@ -81,10 +81,10 @@ final class DiffusionCachedResolveRefsQuery
       $commits = queryfx_all(
         $conn_r,
         'SELECT commitIdentifier FROM %T
-          WHERE repositoryID = %s AND %Q',
+          WHERE repositoryID = %s AND %LO',
         id(new PhabricatorRepositoryCommit())->getTableName(),
         $repository->getID(),
-        implode(' OR ', $prefixes));
+        $prefixes);
 
       foreach ($commits as $commit) {
         $hash = $commit['commitIdentifier'];

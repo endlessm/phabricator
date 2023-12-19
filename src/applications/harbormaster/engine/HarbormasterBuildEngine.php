@@ -49,6 +49,7 @@ final class HarbormasterBuildEngine extends Phobject {
   }
 
   public function continueBuild() {
+    $viewer = $this->getViewer();
     $build = $this->getBuild();
 
     $lock_key = 'harbormaster.build:'.$build->getID();
@@ -68,7 +69,7 @@ final class HarbormasterBuildEngine extends Phobject {
 
       $lock->unlock();
 
-      $this->releaseAllArtifacts($build);
+      $build->releaseAllArtifacts($viewer);
 
       throw $ex;
     }
@@ -99,56 +100,66 @@ final class HarbormasterBuildEngine extends Phobject {
 
     // If we are no longer building for any reason, release all artifacts.
     if (!$build->isBuilding()) {
-      $this->releaseAllArtifacts($build);
+      $build->releaseAllArtifacts($viewer);
     }
   }
 
   private function updateBuild(HarbormasterBuild $build) {
-    if ($build->isAborting()) {
-      $this->releaseAllArtifacts($build);
-      $build->setBuildStatus(HarbormasterBuildStatus::STATUS_ABORTED);
-      $build->save();
+    $viewer = $this->getViewer();
+
+    $content_source = PhabricatorContentSource::newForSource(
+      PhabricatorDaemonContentSource::SOURCECONST);
+
+    $acting_phid = $viewer->getPHID();
+    if (!$acting_phid) {
+      $acting_phid = id(new PhabricatorHarbormasterApplication())->getPHID();
     }
 
-    if (($build->getBuildStatus() == HarbormasterBuildStatus::STATUS_PENDING) ||
-        ($build->isRestarting())) {
-      $this->restartBuild($build);
-      $build->setBuildStatus(HarbormasterBuildStatus::STATUS_BUILDING);
-      $build->save();
+    $editor = $build->getApplicationTransactionEditor()
+      ->setActor($viewer)
+      ->setActingAsPHID($acting_phid)
+      ->setContentSource($content_source)
+      ->setContinueOnNoEffect(true)
+      ->setContinueOnMissingFields(true);
+
+    $xactions = array();
+
+    $messages = $build->getUnprocessedMessagesForApply();
+    foreach ($messages as $message) {
+      $message_type = $message->getType();
+
+      $message_xaction =
+        HarbormasterBuildMessageTransaction::getTransactionTypeForMessageType(
+          $message_type);
+
+      if (!$message_xaction) {
+        continue;
+      }
+
+      $xactions[] = $build->getApplicationTransactionTemplate()
+        ->setAuthorPHID($message->getAuthorPHID())
+        ->setTransactionType($message_xaction)
+        ->setNewValue($message_type);
     }
 
-    if ($build->isResuming()) {
-      $build->setBuildStatus(HarbormasterBuildStatus::STATUS_BUILDING);
-      $build->save();
+    if (!$xactions) {
+      if ($build->isPending()) {
+        // TODO: This should be a transaction.
+
+        $build->restartBuild($viewer);
+        $build->setBuildStatus(HarbormasterBuildStatus::STATUS_BUILDING);
+        $build->save();
+      }
     }
 
-    if ($build->isPausing() && !$build->isComplete()) {
-      $build->setBuildStatus(HarbormasterBuildStatus::STATUS_PAUSED);
-      $build->save();
+    if ($xactions) {
+      $editor->applyTransactions($build, $xactions);
+      $build->markUnprocessedMessagesAsProcessed();
     }
-
-    $build->deleteUnprocessedCommands();
 
     if ($build->getBuildStatus() == HarbormasterBuildStatus::STATUS_BUILDING) {
       $this->updateBuildSteps($build);
     }
-  }
-
-  private function restartBuild(HarbormasterBuild $build) {
-
-    // We're restarting the build, so release all previous artifacts.
-    $this->releaseAllArtifacts($build);
-
-    // Increment the build generation counter on the build.
-    $build->setBuildGeneration($build->getBuildGeneration() + 1);
-
-    // Currently running targets should periodically check their build
-    // generation (which won't have changed) against the build's generation.
-    // If it is different, they will automatically stop what they're doing
-    // and abort.
-
-    // Previously we used to delete targets, logs and artifacts here.  Instead
-    // leave them around so users can view previous generations of this build.
   }
 
   private function updateBuildSteps(HarbormasterBuild $build) {
@@ -382,12 +393,12 @@ final class HarbormasterBuildEngine extends Phobject {
 
     $messages = id(new HarbormasterBuildMessageQuery())
       ->setViewer($this->getViewer())
-      ->withBuildTargetPHIDs(array_keys($waiting_targets))
+      ->withReceiverPHIDs(array_keys($waiting_targets))
       ->withConsumed(false)
       ->execute();
 
     foreach ($messages as $message) {
-      $target = $waiting_targets[$message->getBuildTargetPHID()];
+      $target = $waiting_targets[$message->getReceiverPHID()];
 
       switch ($message->getType()) {
         case HarbormasterMessageType::MESSAGE_PASS:
@@ -428,7 +439,7 @@ final class HarbormasterBuildEngine extends Phobject {
    * @param   HarbormasterBuild The buildable to update.
    * @return  void
    */
-  private function updateBuildable(HarbormasterBuildable $buildable) {
+   public function updateBuildable(HarbormasterBuildable $buildable) {
     $viewer = $this->getViewer();
 
     $lock_key = 'harbormaster.buildable:'.$buildable->getID();
@@ -440,136 +451,160 @@ final class HarbormasterBuildEngine extends Phobject {
       ->needBuilds(true)
       ->executeOne();
 
-    $all_pass = true;
-    $any_fail = false;
-    foreach ($buildable->getBuilds() as $build) {
-      if ($build->getBuildStatus() != HarbormasterBuildStatus::STATUS_PASSED) {
-        $all_pass = false;
-      }
-      if (in_array($build->getBuildStatus(), array(
-          HarbormasterBuildStatus::STATUS_FAILED,
-          HarbormasterBuildStatus::STATUS_ERROR,
-          HarbormasterBuildStatus::STATUS_DEADLOCKED,
-        ))) {
+    $messages = id(new HarbormasterBuildMessageQuery())
+      ->setViewer($viewer)
+      ->withReceiverPHIDs(array($buildable->getPHID()))
+      ->withConsumed(false)
+      ->execute();
 
-        $any_fail = true;
+    $done_preparing = false;
+    $update_container = false;
+    foreach ($messages as $message) {
+      switch ($message->getType()) {
+        case HarbormasterMessageType::BUILDABLE_BUILD:
+          $done_preparing = true;
+          break;
+        case HarbormasterMessageType::BUILDABLE_CONTAINER:
+          $update_container = true;
+          break;
+        default:
+          break;
+      }
+
+      $message
+        ->setIsConsumed(true)
+        ->save();
+    }
+
+    // If we received a "build" command, all builds are scheduled and we can
+    // move out of "preparing" into "building".
+    if ($done_preparing) {
+      if ($buildable->isPreparing()) {
+        $buildable
+          ->setBuildableStatus(HarbormasterBuildableStatus::STATUS_BUILDING)
+          ->save();
       }
     }
 
-    if ($any_fail) {
-      $new_status = HarbormasterBuildable::STATUS_FAILED;
-    } else if ($all_pass) {
-      $new_status = HarbormasterBuildable::STATUS_PASSED;
-    } else {
-      $new_status = HarbormasterBuildable::STATUS_BUILDING;
+    // If we've been informed that the container for the buildable has
+    // changed, update it.
+    if ($update_container) {
+      $object = id(new PhabricatorObjectQuery())
+        ->setViewer($viewer)
+        ->withPHIDs(array($buildable->getBuildablePHID()))
+        ->executeOne();
+      if ($object) {
+        $buildable
+          ->setContainerPHID($object->getHarbormasterContainerPHID())
+          ->save();
+      }
     }
 
-    $old_status = $buildable->getBuildableStatus();
-    $did_update = ($old_status != $new_status);
-    if ($did_update) {
-      $buildable->setBuildableStatus($new_status);
-      $buildable->save();
+    $old = clone $buildable;
+
+    // Don't update the buildable status if we're still preparing builds: more
+    // builds may still be scheduled shortly, so even if every build we know
+    // about so far has passed, that doesn't mean the buildable has actually
+    // passed everything it needs to.
+
+    if (!$buildable->isPreparing()) {
+      $behavior_key = HarbormasterBuildPlanBehavior::BEHAVIOR_BUILDABLE;
+      $behavior = HarbormasterBuildPlanBehavior::getBehavior($behavior_key);
+
+      $key_never = HarbormasterBuildPlanBehavior::BUILDABLE_NEVER;
+      $key_building = HarbormasterBuildPlanBehavior::BUILDABLE_IF_BUILDING;
+
+      $all_pass = true;
+      $any_fail = false;
+      foreach ($buildable->getBuilds() as $build) {
+        $plan = $build->getBuildPlan();
+        $option = $behavior->getPlanOption($plan);
+        $option_key = $option->getKey();
+
+        $is_never = ($option_key === $key_never);
+        $is_building = ($option_key === $key_building);
+
+        // If this build "Never" affects the buildable, ignore it.
+        if ($is_never) {
+          continue;
+        }
+
+        // If this build affects the buildable "If Building", but is already
+        // complete, ignore it.
+        if ($is_building && $build->isComplete()) {
+          continue;
+        }
+
+        if (!$build->isPassed()) {
+          $all_pass = false;
+        }
+
+        if ($build->isComplete() && !$build->isPassed()) {
+          $any_fail = true;
+        }
+      }
+
+      if ($any_fail) {
+        $new_status = HarbormasterBuildableStatus::STATUS_FAILED;
+      } else if ($all_pass) {
+        $new_status = HarbormasterBuildableStatus::STATUS_PASSED;
+      } else {
+        $new_status = HarbormasterBuildableStatus::STATUS_BUILDING;
+      }
+
+      $did_update = ($old->getBuildableStatus() !== $new_status);
+      if ($did_update) {
+        $buildable->setBuildableStatus($new_status);
+        $buildable->save();
+      }
     }
 
     $lock->unlock();
 
-    // If we changed the buildable status, try to post a transaction to the
-    // object about it. We can safely do this outside of the locked region.
-
-    // NOTE: We only post transactions for automatic buildables, not for
-    // manual ones: manual builds are test builds, whoever is doing tests
-    // can look at the results themselves, and other users generally don't
-    // care about the outcome.
-
-    $should_publish = $did_update &&
-                      $new_status != HarbormasterBuildable::STATUS_BUILDING &&
-                      !$buildable->getIsManualBuildable();
-
-    if (!$should_publish) {
+    // Don't publish anything if we're still preparing builds.
+    if ($buildable->isPreparing()) {
       return;
     }
 
+    $this->publishBuildable($old, $buildable);
+  }
+
+  public function publishBuildable(
+    HarbormasterBuildable $old,
+    HarbormasterBuildable $new) {
+
+    $viewer = $this->getViewer();
+
+    // Publish the buildable. We publish buildables even if they haven't
+    // changed status in Harbormaster because applications may care about
+    // different things than Harbormaster does. For example, Differential
+    // does not care about local lint and unit tests when deciding whether
+    // a revision should move out of draft or not.
+
+    // NOTE: We're publishing both automatic and manual buildables. Buildable
+    // objects should generally ignore manual buildables, but it's up to them
+    // to decide.
+
     $object = id(new PhabricatorObjectQuery())
       ->setViewer($viewer)
-      ->withPHIDs(array($buildable->getBuildablePHID()))
+      ->withPHIDs(array($new->getBuildablePHID()))
       ->executeOne();
     if (!$object) {
       return;
     }
 
-    $publish_phid = $object->getHarbormasterPublishablePHID();
-    if (!$publish_phid) {
-      return;
-    }
-
-    if ($publish_phid === $object->getPHID()) {
-      $publish = $object;
-    } else {
-      $publish = id(new PhabricatorObjectQuery())
-        ->setViewer($viewer)
-        ->withPHIDs(array($publish_phid))
-        ->executeOne();
-      if (!$publish) {
-        return;
-      }
-    }
-
-    if (!($publish instanceof PhabricatorApplicationTransactionInterface)) {
-      return;
-    }
-
-    $template = $publish->getApplicationTransactionTemplate();
-    if (!$template) {
-      return;
-    }
-
-    $template
-      ->setTransactionType(PhabricatorTransactions::TYPE_BUILDABLE)
-      ->setMetadataValue(
-        'harbormaster:buildablePHID',
-        $buildable->getPHID())
-      ->setOldValue($old_status)
-      ->setNewValue($new_status);
-
-    $harbormaster_phid = id(new PhabricatorHarbormasterApplication())
-      ->getPHID();
+    $engine = HarbormasterBuildableEngine::newForObject($object, $viewer);
 
     $daemon_source = PhabricatorContentSource::newForSource(
       PhabricatorDaemonContentSource::SOURCECONST);
 
-    $editor = $publish->getApplicationTransactionEditor()
-      ->setActor($viewer)
+    $harbormaster_phid = id(new PhabricatorHarbormasterApplication())
+      ->getPHID();
+
+    $engine
       ->setActingAsPHID($harbormaster_phid)
       ->setContentSource($daemon_source)
-      ->setContinueOnNoEffect(true)
-      ->setContinueOnMissingFields(true);
-
-    $editor->applyTransactions(
-      $publish->getApplicationTransactionObject(),
-      array($template));
-  }
-
-  private function releaseAllArtifacts(HarbormasterBuild $build) {
-    $targets = id(new HarbormasterBuildTargetQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withBuildPHIDs(array($build->getPHID()))
-      ->withBuildGenerations(array($build->getBuildGeneration()))
-      ->execute();
-
-    if (count($targets) === 0) {
-      return;
-    }
-
-    $target_phids = mpull($targets, 'getPHID');
-
-    $artifacts = id(new HarbormasterBuildArtifactQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withBuildTargetPHIDs($target_phids)
-      ->withIsReleased(false)
-      ->execute();
-    foreach ($artifacts as $artifact) {
-      $artifact->releaseArtifact();
-    }
+      ->publishBuildable($old, $new);
   }
 
   private function releaseQueuedArtifacts() {

@@ -7,6 +7,11 @@ final class PhabricatorPeopleNewController
     $type = $request->getURIData('type');
     $admin = $request->getUser();
 
+    id(new PhabricatorAuthSessionEngine())->requireHighSecuritySession(
+      $admin,
+      $request,
+      $this->getApplicationURI());
+
     $is_bot = false;
     $is_list = false;
     switch ($type) {
@@ -45,9 +50,12 @@ final class PhabricatorPeopleNewController
       if (!strlen($new_email)) {
         $errors[] = pht('Email is required.');
         $e_email = pht('Required');
-      } else if (!PhabricatorUserEmail::isAllowedAddress($new_email)) {
+      } else if (!PhabricatorUserEmail::isValidAddress($new_email)) {
+        $errors[] = PhabricatorUserEmail::describeValidAddresses();
         $e_email = pht('Invalid');
+      } else if (!PhabricatorUserEmail::isAllowedAddress($new_email)) {
         $errors[] = PhabricatorUserEmail::describeAllowedAddresses();
+        $e_email = pht('Not Allowed');
       } else {
         $e_email = null;
       }
@@ -102,8 +110,13 @@ final class PhabricatorPeopleNewController
               ->makeMailingListUser($user, true);
           }
 
-          if ($welcome_checked && !$is_bot && !$is_list) {
-            $user->sendWelcomeEmail($admin);
+          if ($welcome_checked) {
+            $welcome_engine = id(new PhabricatorPeopleWelcomeMailEngine())
+              ->setSender($admin)
+              ->setRecipient($user);
+            if ($welcome_engine->canSendMail()) {
+              $welcome_engine->sendMail();
+            }
           }
 
           $response = id(new AphrontRedirectResponse())
@@ -172,7 +185,9 @@ final class PhabricatorPeopleNewController
           ->addCheckbox(
             'welcome',
             1,
-            pht('Send "Welcome to Phabricator" email with login instructions.'),
+            pht(
+              'Send "Welcome to %s" email with login instructions.',
+              PlatformSymbols::getPlatformServerName()),
             $welcome_checked));
     }
 
@@ -189,15 +204,15 @@ final class PhabricatorPeopleNewController
           pht(
             '**Why do bot accounts need an email address?**'.
             "\n\n".
-            'Although bots do not normally receive email from Phabricator, '.
-            'they can interact with other systems which require an email '.
-            'address. Examples include:'.
+            'Although bots do not normally receive email, they can interact '.
+            'with other systems which require an email address. Examples '.
+            'include:'.
             "\n\n".
             "  - If the account takes actions which //send// email, we need ".
             "    an address to use in the //From// header.\n".
             "  - If the account creates commits, Git and Mercurial require ".
             "    an email address for authorship.\n".
-            "  - If you send email //to// Phabricator on behalf of the ".
+            "  - If you send email //to// this server on behalf of the ".
             "    account, the address can identify the sender.\n".
             "  - Some internal authentication functions depend on accounts ".
             "    having an email address.\n".

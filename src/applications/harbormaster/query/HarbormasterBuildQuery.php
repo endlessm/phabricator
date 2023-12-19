@@ -10,6 +10,7 @@ final class HarbormasterBuildQuery
   private $buildPlanPHIDs;
   private $initiatorPHIDs;
   private $needBuildTargets;
+  private $autobuilds;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -41,6 +42,11 @@ final class HarbormasterBuildQuery
     return $this;
   }
 
+  public function withAutobuilds($with_autobuilds) {
+    $this->autobuilds = $with_autobuilds;
+    return $this;
+  }
+
   public function needBuildTargets($need_targets) {
     $this->needBuildTargets = $need_targets;
     return $this;
@@ -48,10 +54,6 @@ final class HarbormasterBuildQuery
 
   public function newResultObject() {
     return new HarbormasterBuild();
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function willFilterPage(array $page) {
@@ -98,13 +100,13 @@ final class HarbormasterBuildQuery
     }
 
     $build_phids = mpull($page, 'getPHID');
-    $commands = id(new HarbormasterBuildCommand())->loadAllWhere(
-      'targetPHID IN (%Ls) ORDER BY id ASC',
+    $messages = id(new HarbormasterBuildMessage())->loadAllWhere(
+      'receiverPHID IN (%Ls) AND isConsumed = 0 ORDER BY id ASC',
       $build_phids);
-    $commands = mgroup($commands, 'getTargetPHID');
+    $messages = mgroup($messages, 'getReceiverPHID');
     foreach ($page as $build) {
-      $unprocessed_commands = idx($commands, $build->getPHID(), array());
-      $build->attachUnprocessedCommands($unprocessed_commands);
+      $unprocessed_messages = idx($messages, $build->getPHID(), array());
+      $build->attachUnprocessedMessages($unprocessed_messages);
     }
 
     if ($this->needBuildTargets) {
@@ -141,50 +143,87 @@ final class HarbormasterBuildQuery
     if ($this->ids !== null) {
       $where[] = qsprintf(
         $conn,
-        'id IN (%Ld)',
+        'b.id IN (%Ld)',
         $this->ids);
     }
 
     if ($this->phids !== null) {
       $where[] = qsprintf(
         $conn,
-        'phid in (%Ls)',
+        'b.phid in (%Ls)',
         $this->phids);
     }
 
     if ($this->buildStatuses !== null) {
       $where[] = qsprintf(
         $conn,
-        'buildStatus in (%Ls)',
+        'b.buildStatus in (%Ls)',
         $this->buildStatuses);
     }
 
     if ($this->buildablePHIDs !== null) {
       $where[] = qsprintf(
         $conn,
-        'buildablePHID IN (%Ls)',
+        'b.buildablePHID IN (%Ls)',
         $this->buildablePHIDs);
     }
 
     if ($this->buildPlanPHIDs !== null) {
       $where[] = qsprintf(
         $conn,
-        'buildPlanPHID IN (%Ls)',
+        'b.buildPlanPHID IN (%Ls)',
         $this->buildPlanPHIDs);
     }
 
     if ($this->initiatorPHIDs !== null) {
       $where[] = qsprintf(
         $conn,
-        'initiatorPHID IN (%Ls)',
+        'b.initiatorPHID IN (%Ls)',
         $this->initiatorPHIDs);
+    }
+
+    if ($this->autobuilds !== null) {
+      if ($this->autobuilds) {
+        $where[] = qsprintf(
+          $conn,
+          'p.planAutoKey IS NOT NULL');
+      } else {
+        $where[] = qsprintf(
+          $conn,
+          'p.planAutoKey IS NULL');
+      }
     }
 
     return $where;
   }
 
+  protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
+    $joins = parent::buildJoinClauseParts($conn);
+
+    if ($this->shouldJoinPlanTable()) {
+      $joins[] = qsprintf(
+        $conn,
+        'JOIN %T p ON b.buildPlanPHID = p.phid',
+        id(new HarbormasterBuildPlan())->getTableName());
+    }
+
+    return $joins;
+  }
+
+  private function shouldJoinPlanTable() {
+    if ($this->autobuilds !== null) {
+      return true;
+    }
+
+    return false;
+  }
+
   public function getQueryApplicationClass() {
     return 'PhabricatorHarbormasterApplication';
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'b';
   }
 
 }

@@ -3,17 +3,15 @@
 final class PhabricatorApplicationUninstallController
   extends PhabricatorApplicationsController {
 
-  private $application;
-  private $action;
-
   public function handleRequest(AphrontRequest $request) {
     $viewer = $request->getViewer();
-    $this->action = $request->getURIData('action');
-    $this->application = $request->getURIData('application');
+    $user = $request->getUser();
+    $action = $request->getURIData('action');
+    $application_name = $request->getURIData('application');
 
-    $selected = id(new PhabricatorApplicationQuery())
+    $application = id(new PhabricatorApplicationQuery())
       ->setViewer($viewer)
-      ->withClasses(array($this->application))
+      ->withClasses(array($application_name))
       ->requireCapabilities(
         array(
           PhabricatorPolicyCapability::CAN_VIEW,
@@ -21,11 +19,11 @@ final class PhabricatorApplicationUninstallController
         ))
       ->executeOne();
 
-    if (!$selected) {
+    if (!$application) {
       return new Aphront404Response();
     }
 
-    $view_uri = $this->getApplicationURI('view/'.$this->application);
+    $view_uri = $this->getApplicationURI('view/'.$application_name);
 
     $prototypes_enabled = PhabricatorEnv::getEnvConfig(
       'phabricator.show-prototypes');
@@ -34,30 +32,52 @@ final class PhabricatorApplicationUninstallController
       ->setUser($viewer)
       ->addCancelButton($view_uri);
 
-    if ($selected->isPrototype() && !$prototypes_enabled) {
+    if ($application->isPrototype() && !$prototypes_enabled) {
       $dialog
         ->setTitle(pht('Prototypes Not Enabled'))
         ->appendChild(
           pht(
             'To manage prototypes, enable them by setting %s in your '.
-            'Phabricator configuration.',
+            'configuration.',
             phutil_tag('tt', array(), 'phabricator.show-prototypes')));
       return id(new AphrontDialogResponse())->setDialog($dialog);
     }
 
     if ($request->isDialogFormPost()) {
-      $this->manageApplication();
-      return id(new AphrontRedirectResponse())->setURI($view_uri);
+      $xactions = array();
+      $template = $application->getApplicationTransactionTemplate();
+      $xactions[] = id(clone $template)
+        ->setTransactionType(
+            PhabricatorApplicationUninstallTransaction::TRANSACTIONTYPE)
+        ->setNewValue($action);
+
+      $editor = id(new PhabricatorApplicationEditor())
+        ->setActor($user)
+        ->setContentSourceFromRequest($request)
+        ->setContinueOnNoEffect(true)
+        ->setContinueOnMissingFields(true);
+
+      try {
+        $editor->applyTransactions($application, $xactions);
+        return id(new AphrontRedirectResponse())->setURI($view_uri);
+      } catch (PhabricatorApplicationTransactionValidationException $ex) {
+        $validation_exception = $ex;
+      }
+
+      return $this->newDialog()
+        ->setTitle(pht('Validation Failed'))
+        ->setValidationException($validation_exception)
+        ->addCancelButton($view_uri);
     }
 
-    if ($this->action == 'install') {
-      if ($selected->canUninstall()) {
+    if ($action == 'install') {
+      if ($application->canUninstall()) {
         $dialog
           ->setTitle(pht('Confirmation'))
           ->appendChild(
             pht(
               'Install %s application?',
-              $selected->getName()))
+              $application->getName()))
           ->addSubmitButton(pht('Install'));
 
       } else {
@@ -66,10 +86,10 @@ final class PhabricatorApplicationUninstallController
           ->appendChild(pht('You cannot install an installed application.'));
       }
     } else {
-      if ($selected->canUninstall()) {
+      if ($application->canUninstall()) {
         $dialog->setTitle(pht('Really Uninstall Application?'));
 
-        if ($selected instanceof PhabricatorHomeApplication) {
+        if ($application instanceof PhabricatorHomeApplication) {
           $dialog
             ->appendParagraph(
               pht(
@@ -78,15 +98,15 @@ final class PhabricatorApplicationUninstallController
             ->appendParagraph(
               pht(
                 'This is very unusual and will leave you without any '.
-                'content on the Phabricator home page. You should only '.
-                'do this if you are certain you know what you are doing.'))
-            ->addSubmitButton(pht('Completely Break Phabricator'));
+                'content on the home page. You should only do this if you '.
+                'are certain you know what you are doing.'))
+            ->addSubmitButton(pht('Completely Break Everything'));
         } else {
           $dialog
             ->appendParagraph(
               pht(
                 'Really uninstall the %s application?',
-                $selected->getName()))
+                $application->getName()))
             ->addSubmitButton(pht('Uninstall'));
         }
       } else {
@@ -94,30 +114,10 @@ final class PhabricatorApplicationUninstallController
           ->setTitle(pht('Information'))
           ->appendChild(
             pht(
-              'This application cannot be uninstalled, '.
-              'because it is required for Phabricator to work.'));
+              'This application is required and cannot be uninstalled.'));
       }
     }
     return id(new AphrontDialogResponse())->setDialog($dialog);
-  }
-
-  public function manageApplication() {
-    $key = 'phabricator.uninstalled-applications';
-    $config_entry = PhabricatorConfigEntry::loadConfigEntry($key);
-    $list = $config_entry->getValue();
-    $uninstalled = PhabricatorEnv::getEnvConfig($key);
-
-    if (isset($uninstalled[$this->application])) {
-      unset($list[$this->application]);
-    } else {
-      $list[$this->application] = true;
-    }
-
-    PhabricatorConfigEditor::storeNewValue(
-      $this->getViewer(),
-      $config_entry,
-      $list,
-      PhabricatorContentSource::newFromRequest($this->getRequest()));
   }
 
 }

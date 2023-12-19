@@ -5,7 +5,7 @@ final class PhabricatorPasteContentTransaction
 
   const TRANSACTIONTYPE = 'paste.create';
 
-  private $fileName;
+  private $filePHID;
 
   public function generateOldValue($object) {
     return $object->getFilePHID();
@@ -16,7 +16,8 @@ final class PhabricatorPasteContentTransaction
   }
 
   public function extractFilePHIDs($object, $value) {
-    return array($value);
+    $file_phid = $this->getFilePHID($object, $value);
+    return array($file_phid);
   }
 
   public function validateTransactions($object, array $xactions) {
@@ -32,27 +33,19 @@ final class PhabricatorPasteContentTransaction
     return array($error);
   }
 
-  public function willApplyTransactions($object, array $xactions) {
-    // Find the most user-friendly filename we can by examining the title of
-    // the paste and the pending transactions. We'll use this if we create a
-    // new file to store raw content later.
-
-    $name = $object->getTitle();
-    if (!strlen($name)) {
-      $name = 'paste.raw';
-    }
-
-    $type_title = PhabricatorPasteTitleTransaction::TRANSACTIONTYPE;
-    foreach ($xactions as $xaction) {
-      if ($xaction->getTransactionType() == $type_title) {
-        $name = $xaction->getNewValue();
-      }
-    }
-
-    $this->fileName = $name;
+  public function generateNewValue($object, $value) {
+    return $this->getFilePHID($object, $value);
   }
 
-  public function generateNewValue($object, $value) {
+  private function getFilePHID($object, $value) {
+    if ($this->filePHID === null) {
+      $this->filePHID = $this->newFilePHID($object, $value);
+    }
+
+    return $this->filePHID;
+  }
+
+  private function newFilePHID($object, $value) {
     // If this transaction does not really change the paste content, return
     // the current file PHID so this transaction no-ops.
     $old_content = $object->getRawContent();
@@ -66,16 +59,23 @@ final class PhabricatorPasteContentTransaction
     $editor = $this->getEditor();
     $actor = $editor->getActor();
 
-    $file = $this->newFileForPaste($actor, $this->fileName, $value);
+    $file = $this->newFileForPaste($actor, $value);
 
     return $file->getPHID();
   }
 
-  private  function newFileForPaste(PhabricatorUser $actor, $name, $data) {
+  private function newFileForPaste(PhabricatorUser $actor, $data) {
+    $editor = $this->getEditor();
+
+    $file_name = $editor->getNewPasteTitle();
+    if (!strlen($file_name)) {
+      $file_name = 'raw-paste-data.txt';
+    }
+
     return PhabricatorFile::newFromFileData(
       $data,
       array(
-        'name' => $name,
+        'name' => $file_name,
         'mime-type' => 'text/plain; charset=utf-8',
         'authorPHID' => $actor->getPHID(),
         'viewPolicy' => PhabricatorPolicies::POLICY_NOONE,

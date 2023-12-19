@@ -50,10 +50,6 @@ final class PhamePostQuery extends PhabricatorCursorPagedPolicyAwareQuery {
     return new PhamePost();
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
-  }
-
   protected function willFilterPage(array $posts) {
     // We require blogs to do visibility checks, so load them unconditionally.
     $blog_phids = mpull($posts, 'getBlogPHID');
@@ -171,15 +167,11 @@ final class PhamePostQuery extends PhabricatorCursorPagedPolicyAwareQuery {
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $post = $this->loadCursorObject($cursor);
-
-    $map = array(
-      'datePublished' => $post->getDatePublished(),
-      'id' => $post->getID(),
+  protected function newPagingMapFromPartialObject($object) {
+    return array(
+      'id' => (int)$object->getID(),
+      'datePublished' => (int)$object->getDatePublished(),
     );
-
-    return $map;
   }
 
   public function getQueryApplicationClass() {

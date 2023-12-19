@@ -16,13 +16,23 @@ final class PhabricatorMercurialGraphStream
   private $local          = array();
   private $localParents   = array();
 
-  public function __construct(PhabricatorRepository $repository, $commit) {
+  public function __construct(PhabricatorRepository $repository,
+    $start_commit = null) {
+
     $this->repository = $repository;
 
+    $command = 'log --template %s --rev %s';
+    $template = '{rev}\1{node}\1{date}\1{parents}\2';
+    if ($start_commit !== null) {
+      $revset = hgsprintf('reverse(ancestors(%s))', $start_commit);
+    } else {
+      $revset = 'reverse(all())';
+    }
+
     $future = $repository->getLocalCommandFuture(
-      'log --template %s --rev %s',
-      '{rev}\1{node}\1{date}\1{parents}\2',
-      hgsprintf('reverse(ancestors(%s))', $commit));
+      $command,
+      $template,
+      $revset);
 
     $this->iterator = new LinesOfALargeExecFuture($future);
     $this->iterator->setDelimiter("\2");
@@ -113,7 +123,7 @@ final class PhabricatorMercurialGraphStream
   private function parseParents($parents, $target_rev) {
 
     // The hg '{parents}' token is empty if there is one "natural" parent
-    // (predecessor local commit ID). Othwerwise, it may have one or two
+    // (predecessor local commit ID). Otherwise, it may have one or two
     // parents. The string looks like this:
     //
     //  151:1f6c61a60586 154:1d5f799ebe1e

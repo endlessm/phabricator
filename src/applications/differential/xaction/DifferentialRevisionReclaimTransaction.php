@@ -6,12 +6,15 @@ final class DifferentialRevisionReclaimTransaction
   const TRANSACTIONTYPE = 'differential.revision.reclaim';
   const ACTIONKEY = 'reclaim';
 
-  protected function getRevisionActionLabel() {
+  protected function getRevisionActionLabel(
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('Reclaim Revision');
   }
 
   protected function getRevisionActionDescription(
-    DifferentialRevision $revision) {
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('This revision will be reclaimed and reopened.');
   }
 
@@ -48,8 +51,12 @@ final class DifferentialRevisionReclaimTransaction
   }
 
   public function applyInternalEffects($object, $value) {
-    $status_review = DifferentialRevisionStatus::NEEDS_REVIEW;
-    $object->setModernRevisionStatus($status_review);
+    if ($object->getShouldBroadcast()) {
+      $new_status = DifferentialRevisionStatus::NEEDS_REVIEW;
+    } else {
+      $new_status = DifferentialRevisionStatus::DRAFT;
+    }
+    $object->setModernRevisionStatus($new_status);
   }
 
   protected function validateAction($object, PhabricatorUser $viewer) {
@@ -79,6 +86,14 @@ final class DifferentialRevisionReclaimTransaction
       '%s reclaimed %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'reclaim';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

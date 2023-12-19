@@ -8,6 +8,7 @@ final class PhortuneSubscriptionQuery
   private $accountPHIDs;
   private $merchantPHIDs;
   private $statuses;
+  private $paymentMethodPHIDs;
 
   private $needTriggers;
 
@@ -36,24 +37,18 @@ final class PhortuneSubscriptionQuery
     return $this;
   }
 
+  public function withPaymentMethodPHIDs(array $method_phids) {
+    $this->paymentMethodPHIDs = $method_phids;
+    return $this;
+  }
+
   public function needTriggers($need_triggers) {
     $this->needTriggers = $need_triggers;
     return $this;
   }
 
-  protected function loadPage() {
-    $table = new PhortuneSubscription();
-    $conn = $table->establishConnection('r');
-
-    $rows = queryfx_all(
-      $conn,
-      'SELECT subscription.* FROM %T subscription %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn),
-      $this->buildOrderClause($conn),
-      $this->buildLimitClause($conn));
-
-    return $table->loadAllFromArray($rows);
+  public function newResultObject() {
+    return new PhortuneSubscription();
   }
 
   protected function willFilterPage(array $subscriptions) {
@@ -67,6 +62,7 @@ final class PhortuneSubscriptionQuery
       $account = idx($accounts, $subscription->getAccountPHID());
       if (!$account) {
         unset($subscriptions[$key]);
+        $this->didRejectResult($subscription);
         continue;
       }
       $subscription->attachAccount($account);
@@ -86,6 +82,7 @@ final class PhortuneSubscriptionQuery
       $merchant = idx($merchants, $subscription->getMerchantPHID());
       if (!$merchant) {
         unset($subscriptions[$key]);
+        $this->didRejectResult($subscription);
         continue;
       }
       $subscription->attachMerchant($merchant);
@@ -112,6 +109,7 @@ final class PhortuneSubscriptionQuery
       $implementation = idx($implementations, $ref);
       if (!$implementation) {
         unset($subscriptions[$key]);
+        $this->didRejectResult($subscription);
         continue;
       }
       $subscription->attachImplementation($implementation);
@@ -133,6 +131,7 @@ final class PhortuneSubscriptionQuery
         $trigger = idx($triggers, $subscription->getTriggerPHID());
         if (!$trigger) {
           unset($subscriptions[$key]);
+          $this->didRejectResult($subscription);
           continue;
         }
         $subscription->attachTrigger($trigger);
@@ -142,10 +141,8 @@ final class PhortuneSubscriptionQuery
     return $subscriptions;
   }
 
-  protected function buildWhereClause(AphrontDatabaseConnection $conn) {
-    $where = array();
-
-    $where[] = $this->buildPagingClause($conn);
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
     if ($this->ids !== null) {
       $where[] = qsprintf(
@@ -182,7 +179,18 @@ final class PhortuneSubscriptionQuery
         $this->statuses);
     }
 
-    return $this->formatWhereClause($where);
+    if ($this->paymentMethodPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'subscription.defaultPaymentMethodPHID IN (%Ls)',
+        $this->paymentMethodPHIDs);
+    }
+
+    return $where;
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'subscription';
   }
 
   public function getQueryApplicationClass() {

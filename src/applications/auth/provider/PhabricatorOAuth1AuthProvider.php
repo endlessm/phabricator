@@ -21,7 +21,7 @@ abstract class PhabricatorOAuth1AuthProvider
     $config = $this->getProviderConfig();
     $adapter->setConsumerKey($config->getProperty(self::PROPERTY_CONSUMER_KEY));
     $secret = $config->getProperty(self::PROPERTY_CONSUMER_SECRET);
-    if (strlen($secret)) {
+    if (phutil_nonempty_string($secret)) {
       $adapter->setConsumerSecret(new PhutilOpaqueEnvelope($secret));
     }
     $adapter->setCallbackURI(PhabricatorEnv::getURI($this->getLoginURI()));
@@ -100,13 +100,13 @@ abstract class PhabricatorOAuth1AuthProvider
     // an access token.
 
     try {
-      $account_id = $adapter->getAccountID();
+      $identifiers = $adapter->getAccountIdentifiers();
     } catch (Exception $ex) {
       // TODO: Handle this in a more user-friendly way.
       throw $ex;
     }
 
-    if (!strlen($account_id)) {
+    if (!$identifiers) {
       $response = $controller->buildProviderErrorResponse(
         $this,
         pht(
@@ -115,7 +115,9 @@ abstract class PhabricatorOAuth1AuthProvider
       return array($account, $response);
     }
 
-    return array($this->loadOrCreateAccount($account_id), $response);
+    $account = $this->newExternalAccountForIdentifiers($identifiers);
+
+    return array($account, $response);
   }
 
   public function processEditForm(
@@ -208,6 +210,9 @@ abstract class PhabricatorOAuth1AuthProvider
     parent::willRenderLinkedAccount($viewer, $item, $account);
   }
 
+  protected function getContentSecurityPolicyFormActions() {
+    return $this->getAdapter()->getContentSecurityPolicyFormActions();
+  }
 
 /* -(  Temporary Secrets  )-------------------------------------------------- */
 
@@ -270,7 +275,7 @@ abstract class PhabricatorOAuth1AuthProvider
   }
 
   private function getHandshakeTokenKeyFromClientCode($client_code) {
-    // NOTE: This is very slightly coersive since the TemporaryToken table
+    // NOTE: This is very slightly coercive since the TemporaryToken table
     // expects an "objectPHID" as an identifier, but nothing about the storage
     // is bound to PHIDs.
 

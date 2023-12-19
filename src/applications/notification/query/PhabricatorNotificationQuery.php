@@ -53,58 +53,140 @@ final class PhabricatorNotificationQuery
 
     $data = queryfx_all(
       $conn,
-      'SELECT story.*, notif.hasViewed FROM %T notif
-         JOIN %T story ON notif.chronologicalKey = story.chronologicalKey
+      'SELECT story.*, notification.hasViewed FROM %R notification
+         JOIN %R story ON notification.chronologicalKey = story.chronologicalKey
          %Q
-         ORDER BY notif.chronologicalKey DESC
+         ORDER BY notification.chronologicalKey DESC
          %Q',
-      $notification_table->getTableName(),
-      $story_table->getTableName(),
+      $notification_table,
+      $story_table,
       $this->buildWhereClause($conn),
       $this->buildLimitClause($conn));
 
-    $viewed_map = ipull($data, 'hasViewed', 'chronologicalKey');
-
-    $stories = PhabricatorFeedStory::loadAllFromRows(
-      $data,
-      $this->getViewer());
-
-    foreach ($stories as $key => $story) {
-      $story->setHasViewed($viewed_map[$key]);
-    }
-
-    return $stories;
+    return $data;
   }
 
-  protected function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
     if ($this->userPHIDs !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'notif.userPHID IN (%Ls)',
+        $conn,
+        'notification.userPHID IN (%Ls)',
         $this->userPHIDs);
     }
 
     if ($this->unread !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'notif.hasViewed = %d',
+        $conn,
+        'notification.hasViewed = %d',
         (int)!$this->unread);
     }
 
-    if ($this->keys) {
+    if ($this->keys !== null) {
       $where[] = qsprintf(
-        $conn_r,
-        'notif.chronologicalKey IN (%Ls)',
+        $conn,
+        'notification.chronologicalKey IN (%Ls)',
         $this->keys);
     }
 
-    return $this->formatWhereClause($where);
+    return $where;
   }
 
-  protected function getResultCursor($item) {
-    return $item->getChronologicalKey();
+  protected function willFilterPage(array $rows) {
+    // See T13623. The policy model here is outdated and awkward.
+
+    // Users may have notifications about objects they can no longer see.
+    // Two ways this can arise: destroy an object; or change an object's
+    // view policy to exclude a user.
+
+    // "PhabricatorFeedStory::loadAllFromRows()" does its own policy filtering.
+    // This doesn't align well with modern query sequencing, but we should be
+    // able to get away with it by loading here.
+
+    // See T13623. Although most queries for notifications return unique
+    // stories, this isn't a guarantee.
+    $story_map = ipull($rows, null, 'chronologicalKey');
+
+    $viewer = $this->getViewer();
+    $stories = PhabricatorFeedStory::loadAllFromRows($story_map, $viewer);
+    $stories = mpull($stories, null, 'getChronologicalKey');
+
+    $results = array();
+    foreach ($rows as $row) {
+      $story_key = $row['chronologicalKey'];
+      $has_viewed = $row['hasViewed'];
+
+      if (!isset($stories[$story_key])) {
+        // NOTE: We can't call "didRejectResult()" here because we don't have
+        // a policy object to pass.
+        continue;
+      }
+
+      $story = id(clone $stories[$story_key])
+        ->setHasViewed($has_viewed);
+
+      if (!$story->isVisibleInNotifications()) {
+        continue;
+      }
+
+      $results[] = $story;
+    }
+
+    return $results;
+  }
+
+  protected function getDefaultOrderVector() {
+    return array('key');
+  }
+
+  public function getBuiltinOrders() {
+    return array(
+      'newest' => array(
+        'vector' => array('key'),
+        'name' => pht('Creation (Newest First)'),
+        'aliases' => array('created'),
+      ),
+      'oldest' => array(
+        'vector' => array('-key'),
+        'name' => pht('Creation (Oldest First)'),
+      ),
+    );
+  }
+
+  public function getOrderableColumns() {
+    return array(
+      'key' => array(
+        'table' => 'notification',
+        'column' => 'chronologicalKey',
+        'type' => 'string',
+        'unique' => true,
+      ),
+    );
+  }
+
+  protected function applyExternalCursorConstraintsToQuery(
+    PhabricatorCursorPagedPolicyAwareQuery $subquery,
+    $cursor) {
+
+    $subquery
+      ->withKeys(array($cursor))
+      ->setLimit(1);
+
+  }
+
+  protected function newExternalCursorStringForResult($object) {
+    return $object->getChronologicalKey();
+  }
+
+  protected function newPagingMapFromPartialObject($object) {
+    return array(
+      'key' => $object['chronologicalKey'],
+    );
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'notification';
   }
 
   public function getQueryApplicationClass() {

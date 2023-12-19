@@ -4,7 +4,8 @@ final class HarbormasterBuild extends HarbormasterDAO
   implements
     PhabricatorApplicationTransactionInterface,
     PhabricatorPolicyInterface,
-    PhabricatorConduitResultInterface {
+    PhabricatorConduitResultInterface,
+    PhabricatorDestructibleInterface {
 
   protected $buildablePHID;
   protected $buildPlanPHID;
@@ -17,7 +18,7 @@ final class HarbormasterBuild extends HarbormasterDAO
   private $buildable = self::ATTACHABLE;
   private $buildPlan = self::ATTACHABLE;
   private $buildTargets = self::ATTACHABLE;
-  private $unprocessedCommands = self::ATTACHABLE;
+  private $unprocessedMessages = self::ATTACHABLE;
 
   public static function initializeNewBuild(PhabricatorUser $actor) {
     return id(new HarbormasterBuild())
@@ -27,7 +28,7 @@ final class HarbormasterBuild extends HarbormasterDAO
 
   public function delete() {
     $this->openTransaction();
-      $this->deleteUnprocessedCommands();
+      $this->deleteUnprocessedMessages();
       $result = parent::delete();
     $this->saveTransaction();
 
@@ -108,9 +109,7 @@ final class HarbormasterBuild extends HarbormasterDAO
   }
 
   public function isBuilding() {
-    return
-      $this->getBuildStatus() === HarbormasterBuildStatus::STATUS_PENDING ||
-      $this->getBuildStatus() === HarbormasterBuildStatus::STATUS_BUILDING;
+    return $this->getBuildStatusObject()->isBuilding();
   }
 
   public function isAutobuild() {
@@ -129,6 +128,11 @@ final class HarbormasterBuild extends HarbormasterDAO
       'step.timestamp' => null,
       'build.id' => null,
       'initiator.phid' => null,
+
+      'buildable.phid' => null,
+      'buildable.object.phid' => null,
+      'buildable.container.phid' => null,
+      'build.phid' => null,
     );
 
     foreach ($this->getBuildParameters() as $key => $value) {
@@ -146,6 +150,11 @@ final class HarbormasterBuild extends HarbormasterDAO
     $results['build.id'] = $this->getID();
     $results['initiator.phid'] = $this->getInitiatorPHID();
 
+    $results['buildable.phid'] = $buildable->getPHID();
+    $results['buildable.object.phid'] = $object->getPHID();
+    $results['buildable.container.phid'] = $buildable->getContainerPHID();
+    $results['build.phid'] = $this->getPHID();
+
     return $results;
   }
 
@@ -162,6 +171,16 @@ final class HarbormasterBuild extends HarbormasterDAO
       'initiator.phid' => pht(
         'The PHID of the user or Object that initiated the build, '.
         'if applicable.'),
+      'buildable.phid' => pht(
+        'The object PHID of the Harbormaster Buildable being built.'),
+      'buildable.object.phid' => pht(
+        'The object PHID of the object (usually a diff or commit) '.
+        'being built.'),
+      'buildable.container.phid' => pht(
+        'The object PHID of the container (usually a revision or repository) '.
+        'for the object being built.'),
+      'build.phid' => pht(
+        'The object PHID of the Harbormaster Build being built.'),
     );
 
     foreach ($objects as $object) {
@@ -173,13 +192,23 @@ final class HarbormasterBuild extends HarbormasterDAO
   }
 
   public function isComplete() {
-    return in_array(
-      $this->getBuildStatus(),
-      HarbormasterBuildStatus::getCompletedStatusConstants());
+    return $this->getBuildStatusObject()->isComplete();
   }
 
   public function isPaused() {
-    return ($this->getBuildStatus() == HarbormasterBuildStatus::STATUS_PAUSED);
+    return $this->getBuildStatusObject()->isPaused();
+  }
+
+  public function isPassed() {
+    return $this->getBuildStatusObject()->isPassed();
+  }
+
+  public function isFailed() {
+    return $this->getBuildStatusObject()->isFailed();
+  }
+
+  public function isPending() {
+    return $this->getBuildstatusObject()->isPending();
   }
 
   public function getURI() {
@@ -187,167 +216,196 @@ final class HarbormasterBuild extends HarbormasterDAO
     return "/harbormaster/build/{$id}/";
   }
 
+  public function getBuildPendingStatusObject() {
+    list($pending_status) = $this->getUnprocessedMessageState();
 
-/* -(  Build Commands  )----------------------------------------------------- */
+    if ($pending_status !== null) {
+      return HarbormasterBuildStatus::newBuildStatusObject($pending_status);
+    }
 
-
-  private function getUnprocessedCommands() {
-    return $this->assertAttached($this->unprocessedCommands);
+    return $this->getBuildStatusObject();
   }
 
-  public function attachUnprocessedCommands(array $commands) {
-    $this->unprocessedCommands = $commands;
+  protected function getBuildStatusObject() {
+    $status_key = $this->getBuildStatus();
+    return HarbormasterBuildStatus::newBuildStatusObject($status_key);
+  }
+
+  public function getObjectName() {
+    return pht('Build %d', $this->getID());
+  }
+
+
+/* -(  Build Messages  )----------------------------------------------------- */
+
+
+  private function getUnprocessedMessages() {
+    return $this->assertAttached($this->unprocessedMessages);
+  }
+
+  public function getUnprocessedMessagesForApply() {
+    $unprocessed_state = $this->getUnprocessedMessageState();
+    list($pending_status, $apply_messages) = $unprocessed_state;
+
+    return $apply_messages;
+  }
+
+  private function getUnprocessedMessageState() {
+    // NOTE: If a build has multiple unprocessed messages, we'll ignore
+    // messages that are obsoleted by a later or stronger message.
+    //
+    // For example, if a build has both "pause" and "abort" messages in queue,
+    // we just ignore the "pause" message and perform an "abort", since pausing
+    // first wouldn't affect the final state, so we can just skip it.
+    //
+    // Likewise, if a build has both "restart" and "abort" messages, the most
+    // recent message is controlling: we'll take whichever action a command
+    // was most recently issued for.
+
+    $is_restarting = false;
+    $is_aborting = false;
+    $is_pausing = false;
+    $is_resuming = false;
+
+    $apply_messages = array();
+
+    foreach ($this->getUnprocessedMessages() as $message_object) {
+      $message_type = $message_object->getType();
+      switch ($message_type) {
+        case HarbormasterBuildMessageRestartTransaction::MESSAGETYPE:
+          $is_restarting = true;
+          $is_aborting = false;
+          $apply_messages = array($message_object);
+          break;
+        case HarbormasterBuildMessageAbortTransaction::MESSAGETYPE:
+          $is_aborting = true;
+          $is_restarting = false;
+          $apply_messages = array($message_object);
+          break;
+        case HarbormasterBuildMessagePauseTransaction::MESSAGETYPE:
+          $is_pausing = true;
+          $is_resuming = false;
+          $apply_messages = array($message_object);
+          break;
+        case HarbormasterBuildMessageResumeTransaction::MESSAGETYPE:
+          $is_resuming = true;
+          $is_pausing = false;
+          $apply_messages = array($message_object);
+          break;
+      }
+    }
+
+    $pending_status = null;
+    if ($is_restarting) {
+      $pending_status = HarbormasterBuildStatus::PENDING_RESTARTING;
+    } else if ($is_aborting) {
+      $pending_status = HarbormasterBuildStatus::PENDING_ABORTING;
+    } else if ($is_pausing) {
+      $pending_status = HarbormasterBuildStatus::PENDING_PAUSING;
+    } else if ($is_resuming) {
+      $pending_status = HarbormasterBuildStatus::PENDING_RESUMING;
+    }
+
+    return array($pending_status, $apply_messages);
+  }
+
+  public function attachUnprocessedMessages(array $messages) {
+    assert_instances_of($messages, 'HarbormasterBuildMessage');
+    $this->unprocessedMessages = $messages;
     return $this;
-  }
-
-  public function canRestartBuild() {
-    if ($this->isAutobuild()) {
-      return false;
-    }
-
-    return !$this->isRestarting();
-  }
-
-  public function canPauseBuild() {
-    if ($this->isAutobuild()) {
-      return false;
-    }
-
-    return !$this->isComplete() &&
-           !$this->isPaused() &&
-           !$this->isPausing();
-  }
-
-  public function canAbortBuild() {
-    if ($this->isAutobuild()) {
-      return false;
-    }
-
-    return !$this->isComplete();
-  }
-
-  public function canResumeBuild() {
-    if ($this->isAutobuild()) {
-      return false;
-    }
-
-    return $this->isPaused() &&
-           !$this->isResuming();
   }
 
   public function isPausing() {
-    $is_pausing = false;
-    foreach ($this->getUnprocessedCommands() as $command_object) {
-      $command = $command_object->getCommand();
-      switch ($command) {
-        case HarbormasterBuildCommand::COMMAND_PAUSE:
-          $is_pausing = true;
-          break;
-        case HarbormasterBuildCommand::COMMAND_RESUME:
-        case HarbormasterBuildCommand::COMMAND_RESTART:
-          $is_pausing = false;
-          break;
-        case HarbormasterBuildCommand::COMMAND_ABORT:
-          $is_pausing = true;
-          break;
-      }
-    }
-
-    return $is_pausing;
+    return $this->getBuildPendingStatusObject()->isPausing();
   }
 
   public function isResuming() {
-    $is_resuming = false;
-    foreach ($this->getUnprocessedCommands() as $command_object) {
-      $command = $command_object->getCommand();
-      switch ($command) {
-        case HarbormasterBuildCommand::COMMAND_RESTART:
-        case HarbormasterBuildCommand::COMMAND_RESUME:
-          $is_resuming = true;
-          break;
-        case HarbormasterBuildCommand::COMMAND_PAUSE:
-          $is_resuming = false;
-          break;
-        case HarbormasterBuildCommand::COMMAND_ABORT:
-          $is_resuming = false;
-          break;
-      }
-    }
-
-    return $is_resuming;
+    return $this->getBuildPendingStatusObject()->isResuming();
   }
 
   public function isRestarting() {
-    $is_restarting = false;
-    foreach ($this->getUnprocessedCommands() as $command_object) {
-      $command = $command_object->getCommand();
-      switch ($command) {
-        case HarbormasterBuildCommand::COMMAND_RESTART:
-          $is_restarting = true;
-          break;
-      }
-    }
-
-    return $is_restarting;
+    return $this->getBuildPendingStatusObject()->isRestarting();
   }
 
   public function isAborting() {
-    $is_aborting = false;
-    foreach ($this->getUnprocessedCommands() as $command_object) {
-      $command = $command_object->getCommand();
-      switch ($command) {
-        case HarbormasterBuildCommand::COMMAND_ABORT:
-          $is_aborting = true;
-          break;
-      }
-    }
-
-    return $is_aborting;
+    return $this->getBuildPendingStatusObject()->isAborting();
   }
 
-  public function deleteUnprocessedCommands() {
-    foreach ($this->getUnprocessedCommands() as $key => $command_object) {
-      $command_object->delete();
-      unset($this->unprocessedCommands[$key]);
+  public function markUnprocessedMessagesAsProcessed() {
+    foreach ($this->getUnprocessedMessages() as $key => $message_object) {
+      $message_object
+        ->setIsConsumed(1)
+        ->save();
     }
 
     return $this;
   }
 
-  public function canIssueCommand(PhabricatorUser $viewer, $command) {
-    try {
-      $this->assertCanIssueCommand($viewer, $command);
-      return true;
-    } catch (Exception $ex) {
-      return false;
+  public function deleteUnprocessedMessages() {
+    foreach ($this->getUnprocessedMessages() as $key => $message_object) {
+      $message_object->delete();
+      unset($this->unprocessedMessages[$key]);
+    }
+
+    return $this;
+  }
+
+  public function sendMessage(PhabricatorUser $viewer, $message_type) {
+    HarbormasterBuildMessage::initializeNewMessage($viewer)
+      ->setReceiverPHID($this->getPHID())
+      ->setType($message_type)
+      ->save();
+
+    PhabricatorWorker::scheduleTask(
+      'HarbormasterBuildWorker',
+      array(
+        'buildID' => $this->getID(),
+      ),
+      array(
+        'objectPHID' => $this->getPHID(),
+        'containerPHID' => $this->getBuildablePHID(),
+      ));
+  }
+
+  public function releaseAllArtifacts(PhabricatorUser $viewer) {
+    $targets = id(new HarbormasterBuildTargetQuery())
+      ->setViewer($viewer)
+      ->withBuildPHIDs(array($this->getPHID()))
+      ->withBuildGenerations(array($this->getBuildGeneration()))
+      ->execute();
+
+    if (!$targets) {
+      return;
+    }
+
+    $target_phids = mpull($targets, 'getPHID');
+
+    $artifacts = id(new HarbormasterBuildArtifactQuery())
+      ->setViewer($viewer)
+      ->withBuildTargetPHIDs($target_phids)
+      ->withIsReleased(false)
+      ->execute();
+    foreach ($artifacts as $artifact) {
+      $artifact->releaseArtifact();
     }
   }
 
-  public function assertCanIssueCommand(PhabricatorUser $viewer, $command) {
-    $need_edit = false;
-    switch ($command) {
-      case HarbormasterBuildCommand::COMMAND_RESTART:
-        break;
-      case HarbormasterBuildCommand::COMMAND_PAUSE:
-      case HarbormasterBuildCommand::COMMAND_RESUME:
-      case HarbormasterBuildCommand::COMMAND_ABORT:
-        $need_edit = true;
-        break;
-      default:
-        throw new Exception(
-          pht(
-            'Invalid Harbormaster build command "%s".',
-            $command));
-    }
+  public function restartBuild(PhabricatorUser $viewer) {
+    // TODO: This should become transactional.
 
-    // Issuing these commands requires that you be able to edit the build, to
-    // prevent enemy engineers from sabotaging your builds. See T9614.
-    if ($need_edit) {
-      PhabricatorPolicyFilter::requireCapability(
-        $viewer,
-        $this->getBuildPlan(),
-        PhabricatorPolicyCapability::CAN_EDIT);
-    }
+    // We're restarting the build, so release all previous artifacts.
+    $this->releaseAllArtifacts($viewer);
+
+    // Increment the build generation counter on the build.
+    $this->setBuildGeneration($this->getBuildGeneration() + 1);
+
+    // Currently running targets should periodically check their build
+    // generation (which won't have changed) against the build's generation.
+    // If it is different, they will automatically stop what they're doing
+    // and abort.
+
+    // Previously we used to delete targets, logs and artifacts here. Instead,
+    // leave them around so users can view previous generations of this build.
   }
 
 
@@ -358,19 +416,8 @@ final class HarbormasterBuild extends HarbormasterDAO
     return new HarbormasterBuildTransactionEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new HarbormasterBuildTransaction();
-  }
-
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-
-    return $timeline;
   }
 
 
@@ -435,6 +482,8 @@ final class HarbormasterBuild extends HarbormasterDAO
       'buildStatus' => array(
         'value' => $status,
         'name' => HarbormasterBuildStatus::getBuildStatusName($status),
+        'color.ansi' =>
+          HarbormasterBuildStatus::getBuildStatusANSIColor($status),
       ),
       'initiatorPHID' => nonempty($this->getInitiatorPHID(), null),
       'name' => $this->getName(),
@@ -447,5 +496,34 @@ final class HarbormasterBuild extends HarbormasterDAO
         ->setAttachmentKey('querybuilds'),
     );
   }
+
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+    $viewer = $engine->getViewer();
+
+    $this->openTransaction();
+      $targets = id(new HarbormasterBuildTargetQuery())
+        ->setViewer($viewer)
+        ->withBuildPHIDs(array($this->getPHID()))
+        ->execute();
+      foreach ($targets as $target) {
+        $engine->destroyObject($target);
+      }
+
+      $messages = id(new HarbormasterBuildMessageQuery())
+        ->setViewer($viewer)
+        ->withReceiverPHIDs(array($this->getPHID()))
+        ->execute();
+      foreach ($messages as $message) {
+        $engine->destroyObject($message);
+      }
+
+      $this->delete();
+    $this->saveTransaction();
+  }
+
 
 }

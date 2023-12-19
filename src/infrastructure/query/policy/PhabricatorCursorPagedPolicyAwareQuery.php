@@ -4,6 +4,7 @@
  * A query class which uses cursor-based paging. This paging is much more
  * performant than offset-based paging in the presence of policy filtering.
  *
+ * @task cursors Query Cursors
  * @task clauses Building Query Clauses
  * @task appsearch Integration with ApplicationSearch
  * @task customfield Integration with CustomField
@@ -15,8 +16,11 @@
 abstract class PhabricatorCursorPagedPolicyAwareQuery
   extends PhabricatorPolicyAwareQuery {
 
-  private $afterID;
-  private $beforeID;
+  private $externalCursorString;
+  private $internalCursorObject;
+  private $isQueryOrderReversed = false;
+  private $rawCursorRow;
+
   private $applicationSearchConstraints = array();
   private $internalPaging;
   private $orderVector;
@@ -32,55 +36,221 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
   private $ferretTables = array();
   private $ferretQuery;
   private $ferretMetadata = array();
+  private $ngramEngine;
 
-  protected function getPageCursors(array $page) {
+  const FULLTEXT_RANK = '_ft_rank';
+  const FULLTEXT_MODIFIED = '_ft_epochModified';
+  const FULLTEXT_CREATED = '_ft_epochCreated';
+
+/* -(  Cursors  )------------------------------------------------------------ */
+
+  protected function newExternalCursorStringForResult($object) {
+    if (!($object instanceof LiskDAO)) {
+      throw new Exception(
+        pht(
+          'Expected to be passed a result object of class "LiskDAO" in '.
+          '"newExternalCursorStringForResult()", actually passed "%s". '.
+          'Return storage objects from "loadPage()" or override '.
+          '"newExternalCursorStringForResult()".',
+          phutil_describe_type($object)));
+    }
+
+    return (string)$object->getID();
+  }
+
+  protected function newInternalCursorFromExternalCursor($cursor) {
+    $viewer = $this->getViewer();
+
+    $query = newv(get_class($this), array());
+
+    $query
+      ->setParentQuery($this)
+      ->setViewer($viewer);
+
+    // We're copying our order vector to the subquery so that the subquery
+    // knows it should generate any supplemental information required by the
+    // ordering.
+
+    // For example, Phriction documents may be ordered by title, but the title
+    // isn't a column in the "document" table: the query must JOIN the
+    // "content" table to perform the ordering. Passing the ordering to the
+    // subquery tells it that we need it to do that JOIN and attach relevant
+    // paging information to the internal cursor object.
+
+    // We only expect to load a single result, so the actual result order does
+    // not matter. We only want the internal cursor for that result to look
+    // like a cursor this parent query would generate.
+    $query->setOrderVector($this->getOrderVector());
+
+    $this->applyExternalCursorConstraintsToQuery($query, $cursor);
+
+    // If we have a Ferret fulltext query, copy it to the subquery so that we
+    // generate ranking columns appropriately, and compute the correct object
+    // ranking score for the current query.
+    if ($this->ferretEngine) {
+      $query->withFerretConstraint($this->ferretEngine, $this->ferretTokens);
+    }
+
+    // We're executing the subquery normally to make sure the viewer can
+    // actually see the object, and that it's a completely valid object which
+    // passes all filtering and policy checks. You aren't allowed to use an
+    // object you can't see as a cursor, since this can leak information.
+    $result = $query->executeOne();
+    if (!$result) {
+      $this->throwCursorException(
+        pht(
+          'Cursor "%s" does not identify a valid object in query "%s".',
+          $cursor,
+          get_class($this)));
+    }
+
+    // Now that we made sure the viewer can actually see the object the
+    // external cursor identifies, return the internal cursor the query
+    // generated as a side effect while loading the object.
+    return $query->getInternalCursorObject();
+  }
+
+  final protected function throwCursorException($message) {
+    throw new PhabricatorInvalidQueryCursorException($message);
+  }
+
+  protected function applyExternalCursorConstraintsToQuery(
+    PhabricatorCursorPagedPolicyAwareQuery $subquery,
+    $cursor) {
+    $subquery->withIDs(array($cursor));
+  }
+
+  protected function newPagingMapFromCursorObject(
+    PhabricatorQueryCursor $cursor,
+    array $keys) {
+
+    $object = $cursor->getObject();
+
+    return $this->newPagingMapFromPartialObject($object);
+  }
+
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      $this->getResultCursor(head($page)),
-      $this->getResultCursor(last($page)),
+      'id' => (int)$object->getID(),
     );
   }
 
-  protected function getResultCursor($object) {
-    if (!is_object($object)) {
+  private function getExternalCursorStringForResult($object) {
+    $cursor = $this->newExternalCursorStringForResult($object);
+
+    if (!is_string($cursor)) {
       throw new Exception(
         pht(
-          'Expected object, got "%s".',
-          gettype($object)));
+          'Expected "newExternalCursorStringForResult()"  in class "%s" to '.
+          'return a string, but got "%s".',
+          get_class($this),
+          phutil_describe_type($cursor)));
     }
 
-    return $object->getID();
+    return $cursor;
   }
 
-  protected function nextPage(array $page) {
-    // See getPagingViewer() for a description of this flag.
-    $this->internalPaging = true;
-
-    if ($this->beforeID !== null) {
-      $page = array_reverse($page, $preserve_keys = true);
-      list($before, $after) = $this->getPageCursors($page);
-      $this->beforeID = $before;
-    } else {
-      list($before, $after) = $this->getPageCursors($page);
-      $this->afterID = $after;
-    }
+  final protected function getExternalCursorString() {
+    return $this->externalCursorString;
   }
 
-  final public function setAfterID($object_id) {
-    $this->afterID = $object_id;
+  private function setExternalCursorString($external_cursor) {
+    $this->externalCursorString = $external_cursor;
     return $this;
   }
 
-  final protected function getAfterID() {
-    return $this->afterID;
+  final protected function getIsQueryOrderReversed() {
+    return $this->isQueryOrderReversed;
   }
 
-  final public function setBeforeID($object_id) {
-    $this->beforeID = $object_id;
+  final protected function setIsQueryOrderReversed($is_reversed) {
+    $this->isQueryOrderReversed = $is_reversed;
     return $this;
   }
 
-  final protected function getBeforeID() {
-    return $this->beforeID;
+  private function getInternalCursorObject() {
+    return $this->internalCursorObject;
+  }
+
+  private function setInternalCursorObject(
+    PhabricatorQueryCursor $cursor) {
+    $this->internalCursorObject = $cursor;
+    return $this;
+  }
+
+  private function getInternalCursorFromExternalCursor(
+    $cursor_string) {
+
+    $cursor_object = $this->newInternalCursorFromExternalCursor($cursor_string);
+
+    if (!($cursor_object instanceof PhabricatorQueryCursor)) {
+      throw new Exception(
+        pht(
+          'Expected "newInternalCursorFromExternalCursor()" to return an '.
+          'object of class "PhabricatorQueryCursor", but got "%s" (in '.
+          'class "%s").',
+          phutil_describe_type($cursor_object),
+          get_class($this)));
+    }
+
+    return $cursor_object;
+  }
+
+  private function getPagingMapFromCursorObject(
+    PhabricatorQueryCursor $cursor,
+    array $keys) {
+
+    $map = $this->newPagingMapFromCursorObject($cursor, $keys);
+
+    if (!is_array($map)) {
+      throw new Exception(
+        pht(
+          'Expected "newPagingMapFromCursorObject()" to return a map of '.
+          'paging values, but got "%s" (in class "%s").',
+          phutil_describe_type($map),
+          get_class($this)));
+    }
+
+    if ($this->supportsFerretEngine()) {
+      if ($this->hasFerretOrder()) {
+        $map += array(
+          'rank' =>
+            $cursor->getRawRowProperty(self::FULLTEXT_RANK),
+          'fulltext-modified' =>
+            $cursor->getRawRowProperty(self::FULLTEXT_MODIFIED),
+          'fulltext-created' =>
+            $cursor->getRawRowProperty(self::FULLTEXT_CREATED),
+        );
+      }
+    }
+
+    foreach ($keys as $key) {
+      if (!array_key_exists($key, $map)) {
+        throw new Exception(
+          pht(
+            'Map returned by "newPagingMapFromCursorObject()" in class "%s" '.
+            'omits required key "%s".',
+            get_class($this),
+            $key));
+      }
+    }
+
+    return $map;
+  }
+
+  final protected function nextPage(array $page) {
+    if (!$page) {
+      return;
+    }
+
+    $cursor = id(new PhabricatorQueryCursor())
+      ->setObject(last($page));
+
+    if ($this->rawCursorRow) {
+      $cursor->setRawRow($this->rawCursorRow);
+    }
+
+    $this->setInternalCursorObject($cursor);
   }
 
   final public function getFerretMetadata() {
@@ -93,6 +263,24 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     }
 
     return $this->ferretMetadata;
+  }
+
+  protected function loadPage() {
+    $object = $this->newResultObject();
+
+    if (!$object instanceof PhabricatorLiskDAO) {
+      throw new Exception(
+        pht(
+          'Query class ("%s") did not return the correct type of object '.
+          'from "newResultObject()" (expected a subclass of '.
+          '"PhabricatorLiskDAO", found "%s"). Return an object of the '.
+          'expected type (this is common), or implement a custom '.
+          '"loadPage()" method (this is unusual in modern code).',
+          get_class($this),
+          phutil_describe_type($object)));
+    }
+
+    return $this->loadStandardPage($object);
   }
 
   protected function loadStandardPage(PhabricatorLiskDAO $table) {
@@ -111,25 +299,42 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     AphrontDatabaseConnection $conn,
     $table_name) {
 
-    $rows = queryfx_all(
+    $query = $this->buildStandardPageQuery($conn, $table_name);
+
+    $rows = queryfx_all($conn, '%Q', $query);
+    $rows = $this->didLoadRawRows($rows);
+
+    return $rows;
+  }
+
+  protected function buildStandardPageQuery(
+    AphrontDatabaseConnection $conn,
+    $table_name) {
+
+    $table_alias = $this->getPrimaryTableAlias();
+    if ($table_alias === null) {
+      $table_alias = qsprintf($conn, '');
+    } else {
+      $table_alias = qsprintf($conn, '%T', $table_alias);
+    }
+
+    return qsprintf(
       $conn,
       '%Q FROM %T %Q %Q %Q %Q %Q %Q %Q',
       $this->buildSelectClause($conn),
       $table_name,
-      (string)$this->getPrimaryTableAlias(),
+      $table_alias,
       $this->buildJoinClause($conn),
       $this->buildWhereClause($conn),
       $this->buildGroupClause($conn),
       $this->buildHavingClause($conn),
       $this->buildOrderClause($conn),
       $this->buildLimitClause($conn));
-
-    $rows = $this->didLoadRawRows($rows);
-
-    return $rows;
   }
 
   protected function didLoadRawRows(array $rows) {
+    $this->rawCursorRow = last($rows);
+
     if ($this->ferretEngine) {
       foreach ($rows as $row) {
         $phid = $row['phid'];
@@ -137,65 +342,28 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
         $metadata = id(new PhabricatorFerretMetadata())
           ->setPHID($phid)
           ->setEngine($this->ferretEngine)
-          ->setRelevance(idx($row, '_ft_rank'));
+          ->setRelevance(idx($row, self::FULLTEXT_RANK));
 
         $this->ferretMetadata[$phid] = $metadata;
 
-        unset($row['_ft_rank']);
+        unset($row[self::FULLTEXT_RANK]);
+        unset($row[self::FULLTEXT_MODIFIED]);
+        unset($row[self::FULLTEXT_CREATED]);
       }
     }
 
     return $rows;
   }
 
-  /**
-   * Get the viewer for making cursor paging queries.
-   *
-   * NOTE: You should ONLY use this viewer to load cursor objects while
-   * building paging queries.
-   *
-   * Cursor paging can happen in two ways. First, the user can request a page
-   * like `/stuff/?after=33`, which explicitly causes paging. Otherwise, we
-   * can fall back to implicit paging if we filter some results out of a
-   * result list because the user can't see them and need to go fetch some more
-   * results to generate a large enough result list.
-   *
-   * In the first case, want to use the viewer's policies to load the object.
-   * This prevents an attacker from figuring out information about an object
-   * they can't see by executing queries like `/stuff/?after=33&order=name`,
-   * which would otherwise give them a hint about the name of the object.
-   * Generally, if a user can't see an object, they can't use it to page.
-   *
-   * In the second case, we need to load the object whether the user can see
-   * it or not, because we need to examine new results. For example, if a user
-   * loads `/stuff/` and we run a query for the first 100 items that they can
-   * see, but the first 100 rows in the database aren't visible, we need to
-   * be able to issue a query for the next 100 results. If we can't load the
-   * cursor object, we'll fail or issue the same query over and over again.
-   * So, generally, internal paging must bypass policy controls.
-   *
-   * This method returns the appropriate viewer, based on the context in which
-   * the paging is occuring.
-   *
-   * @return PhabricatorUser Viewer for executing paging queries.
-   */
-  final protected function getPagingViewer() {
-    if ($this->internalPaging) {
-      return PhabricatorUser::getOmnipotentUser();
-    } else {
-      return $this->getViewer();
-    }
-  }
-
-  final protected function buildLimitClause(AphrontDatabaseConnection $conn_r) {
+  final protected function buildLimitClause(AphrontDatabaseConnection $conn) {
     if ($this->shouldLimitResults()) {
       $limit = $this->getRawResultLimit();
       if ($limit) {
-        return qsprintf($conn_r, 'LIMIT %d', $limit);
+        return qsprintf($conn, 'LIMIT %d', $limit);
       }
     }
 
-    return '';
+    return qsprintf($conn, '');
   }
 
   protected function shouldLimitResults() {
@@ -203,11 +371,15 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
   }
 
   final protected function didLoadResults(array $results) {
-    if ($this->beforeID) {
+    if ($this->getIsQueryOrderReversed()) {
       $results = array_reverse($results, $preserve_keys = true);
     }
 
     return $results;
+  }
+
+  final public function newIterator() {
+    return new PhabricatorQueryIterator($this);
   }
 
   final public function executeWithCursorPager(AphrontCursorPagerView $pager) {
@@ -215,10 +387,14 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
     $this->setLimit($limit + 1);
 
-    if ($pager->getAfterID()) {
-      $this->setAfterID($pager->getAfterID());
-    } else if ($pager->getBeforeID()) {
-      $this->setBeforeID($pager->getBeforeID());
+    $after_id = phutil_string_cast($pager->getAfterID());
+    $before_id = phutil_string_cast($pager->getBeforeID());
+
+    if (phutil_nonempty_string($after_id)) {
+      $this->setExternalCursorString($after_id);
+    } else if (phutil_nonempty_string($before_id)) {
+      $this->setExternalCursorString($before_id);
+      $this->setIsQueryOrderReversed(true);
     }
 
     $results = $this->execute();
@@ -226,15 +402,22 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
     $sliced_results = $pager->sliceResults($results);
     if ($sliced_results) {
-      list($before, $after) = $this->getPageCursors($sliced_results);
+
+      // If we have results, generate external-facing cursors from the visible
+      // results. This stops us from leaking any internal details about objects
+      // which we loaded but which were not visible to the viewer.
 
       if ($pager->getBeforeID() || ($count > $limit)) {
-        $pager->setNextPageID($after);
+        $last_object = last($sliced_results);
+        $cursor = $this->getExternalCursorStringForResult($last_object);
+        $pager->setNextPageID($cursor);
       }
 
       if ($pager->getAfterID() ||
          ($pager->getBeforeID() && ($count > $limit))) {
-        $pager->setPrevPageID($before);
+        $head_object = head($sliced_results);
+        $cursor = $this->getExternalCursorStringForResult($head_object);
+        $pager->setPrevPageID($cursor);
       }
     }
 
@@ -269,7 +452,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   protected function buildSelectClause(AphrontDatabaseConnection $conn) {
     $parts = $this->buildSelectClauseParts($conn);
-    return $this->formatSelectClause($parts);
+    return $this->formatSelectClause($conn, $parts);
   }
 
 
@@ -283,7 +466,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     if ($alias) {
       $select[] = qsprintf($conn, '%T.*', $alias);
     } else {
-      $select[] = '*';
+      $select[] = qsprintf($conn, '*');
     }
 
     $select[] = $this->buildEdgeLogicSelectClause($conn);
@@ -298,7 +481,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   protected function buildJoinClause(AphrontDatabaseConnection $conn) {
     $joins = $this->buildJoinClauseParts($conn);
-    return $this->formatJoinClause($joins);
+    return $this->formatJoinClause($conn, $joins);
   }
 
 
@@ -320,7 +503,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   protected function buildWhereClause(AphrontDatabaseConnection $conn) {
     $where = $this->buildWhereClauseParts($conn);
-    return $this->formatWhereClause($where);
+    return $this->formatWhereClause($conn, $where);
   }
 
 
@@ -329,11 +512,12 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
     $where = array();
-    $where[] = $this->buildPagingClause($conn);
+    $where[] = $this->buildPagingWhereClause($conn);
     $where[] = $this->buildEdgeLogicWhereClause($conn);
     $where[] = $this->buildSpacesWhereClause($conn);
     $where[] = $this->buildNgramsWhereClause($conn);
     $where[] = $this->buildFerretWhereClause($conn);
+    $where[] = $this->buildApplicationSearchWhereClause($conn);
     return $where;
   }
 
@@ -343,7 +527,8 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   protected function buildHavingClause(AphrontDatabaseConnection $conn) {
     $having = $this->buildHavingClauseParts($conn);
-    return $this->formatHavingClause($having);
+    $having[] = $this->buildPagingHavingClause($conn);
+    return $this->formatHavingClause($conn, $having);
   }
 
 
@@ -362,13 +547,13 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   protected function buildGroupClause(AphrontDatabaseConnection $conn) {
     if (!$this->shouldGroupQueryResultRows()) {
-      return '';
+      return qsprintf($conn, '');
     }
 
     return qsprintf(
       $conn,
       'GROUP BY %Q',
-      $this->getApplicationSearchObjectPHIDColumn());
+      $this->getApplicationSearchObjectPHIDColumn($conn));
   }
 
 
@@ -400,44 +585,85 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 /* -(  Paging  )------------------------------------------------------------- */
 
 
+  private function buildPagingWhereClause(AphrontDatabaseConnection $conn) {
+    if ($this->shouldPageWithHavingClause()) {
+      return null;
+    }
+
+    return $this->buildPagingClause($conn);
+  }
+
+  private function buildPagingHavingClause(AphrontDatabaseConnection $conn) {
+    if (!$this->shouldPageWithHavingClause()) {
+      return null;
+    }
+
+    return $this->buildPagingClause($conn);
+  }
+
+  private function shouldPageWithHavingClause() {
+    // If any of the paging conditions reference dynamic columns, we need to
+    // put the paging conditions in a "HAVING" clause instead of a "WHERE"
+    // clause.
+
+    // For example, this happens when paging on the Ferret "rank" column,
+    // since the "rank" value is computed dynamically in the SELECT statement.
+
+    $orderable = $this->getOrderableColumns();
+    $vector = $this->getOrderVector();
+
+    foreach ($vector as $order) {
+      $key = $order->getOrderKey();
+      $column = $orderable[$key];
+
+      if (!empty($column['having'])) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /**
    * @task paging
    */
   protected function buildPagingClause(AphrontDatabaseConnection $conn) {
     $orderable = $this->getOrderableColumns();
-    $vector = $this->getOrderVector();
+    $vector = $this->getQueryableOrderVector();
 
-    if ($this->beforeID !== null) {
-      $cursor = $this->beforeID;
-      $reversed = true;
-    } else if ($this->afterID !== null) {
-      $cursor = $this->afterID;
-      $reversed = false;
-    } else {
-      // No paging is being applied to this query so we do not need to
-      // construct a paging clause.
-      return '';
+    // If we don't have a cursor object yet, it means we're trying to load
+    // the first result page. We may need to build a cursor object from the
+    // external string, or we may not need a paging clause yet.
+    $cursor_object = $this->getInternalCursorObject();
+    if (!$cursor_object) {
+      $external_cursor = $this->getExternalCursorString();
+      if ($external_cursor !== null) {
+        $cursor_object = $this->getInternalCursorFromExternalCursor(
+          $external_cursor);
+      }
     }
+
+    // If we still don't have a cursor object, this is the first result page
+    // and we aren't paging it. We don't need to build a paging clause.
+    if (!$cursor_object) {
+      return qsprintf($conn, '');
+    }
+
+    $reversed = $this->getIsQueryOrderReversed();
 
     $keys = array();
     foreach ($vector as $order) {
       $keys[] = $order->getOrderKey();
     }
+    $keys = array_fuse($keys);
 
-    $value_map = $this->getPagingValueMap($cursor, $keys);
+    $value_map = $this->getPagingMapFromCursorObject(
+      $cursor_object,
+      $keys);
 
     $columns = array();
     foreach ($vector as $order) {
       $key = $order->getOrderKey();
-
-      if (!array_key_exists($key, $value_map)) {
-        throw new Exception(
-          pht(
-            'Query "%s" failed to return a value from getPagingValueMap() '.
-            'for column "%s".',
-            get_class($this),
-            $key));
-      }
 
       $column = $orderable[$key];
       $column['value'] = $value_map[$key];
@@ -457,48 +683,6 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       array(
         'reversed' => $reversed,
       ));
-  }
-
-
-  /**
-   * @task paging
-   */
-  protected function getPagingValueMap($cursor, array $keys) {
-    return array(
-      'id' => $cursor,
-    );
-  }
-
-
-  /**
-   * @task paging
-   */
-  protected function loadCursorObject($cursor) {
-    $query = newv(get_class($this), array())
-      ->setViewer($this->getPagingViewer())
-      ->withIDs(array((int)$cursor));
-
-    $this->willExecuteCursorQuery($query);
-
-    $object = $query->executeOne();
-    if (!$object) {
-      throw new Exception(
-        pht(
-          'Cursor "%s" does not identify a valid object in query "%s".',
-          $cursor,
-          get_class($this)));
-    }
-
-    return $object;
-  }
-
-
-  /**
-   * @task paging
-   */
-  protected function willExecuteCursorQuery(
-    PhabricatorCursorPagedPolicyAwareQuery $query) {
-    return;
   }
 
 
@@ -536,7 +720,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    *
    * @param AphrontDatabaseConnection Connection query will execute on.
    * @param list<map> Column description dictionaries.
-   * @param map Additional constuction options.
+   * @param map Additional construction options.
    * @return string Query clause.
    * @task paging
    */
@@ -556,6 +740,8 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           'reverse' => 'optional bool',
           'unique' => 'optional bool',
           'null' => 'optional string|null',
+          'requires-ferret' => 'optional bool',
+          'having' => 'optional bool',
         ));
     }
 
@@ -646,24 +832,16 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           $conn,
           '%Q %Q %Q',
           $field,
-          $reverse ? '>' : '<',
+          $reverse ? qsprintf($conn, '>') : qsprintf($conn, '<'),
           $value);
       }
 
       if ($parts) {
-        if (count($parts) > 1) {
-          $clause[] = '('.implode(') OR (', $parts).')';
-        } else {
-          $clause[] = head($parts);
-        }
+        $clause[] = qsprintf($conn, '%LO', $parts);
       }
 
       if ($clause) {
-        if (count($clause) > 1) {
-          $clauses[] = '('.implode(') AND (', $clause).')';
-        } else {
-          $clauses[] = head($clause);
-        }
+        $clauses[] = qsprintf($conn, '%LA', $clause);
       }
 
       if ($value === null) {
@@ -680,7 +858,11 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
     }
 
-    return '('.implode(') OR (', $clauses).')';
+    if ($clauses) {
+      return qsprintf($conn, '%LO', $clauses);
+    }
+
+    return qsprintf($conn, '');
   }
 
 
@@ -1008,18 +1190,22 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     if ($this->supportsFerretEngine()) {
       $columns['rank'] = array(
         'table' => null,
-        'column' => '_ft_rank',
+        'column' => self::FULLTEXT_RANK,
         'type' => 'int',
+        'requires-ferret' => true,
+        'having' => true,
       );
       $columns['fulltext-created'] = array(
-        'table' => 'ft_doc',
-        'column' => 'epochCreated',
+        'table' => null,
+        'column' => self::FULLTEXT_CREATED,
         'type' => 'int',
+        'requires-ferret' => true,
       );
       $columns['fulltext-modified'] = array(
-        'table' => 'ft_doc',
-        'column' => 'epochModified',
+        'table' => null,
+        'column' => self::FULLTEXT_MODIFIED,
         'type' => 'int',
+        'requires-ferret' => true,
       );
     }
 
@@ -1032,34 +1218,61 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
   /**
    * @task order
    */
-  final protected function buildOrderClause(AphrontDatabaseConnection $conn) {
+  final protected function buildOrderClause(
+    AphrontDatabaseConnection $conn,
+    $for_union = false) {
+
     $orderable = $this->getOrderableColumns();
-    $vector = $this->getOrderVector();
+    $vector = $this->getQueryableOrderVector();
 
     $parts = array();
     foreach ($vector as $order) {
       $part = $orderable[$order->getOrderKey()];
+
       if ($order->getIsReversed()) {
         $part['reverse'] = !idx($part, 'reverse', false);
       }
       $parts[] = $part;
     }
 
-    return $this->formatOrderClause($conn, $parts);
+    return $this->formatOrderClause($conn, $parts, $for_union);
   }
 
+  /**
+   * @task order
+   */
+  private function getQueryableOrderVector() {
+    $vector = $this->getOrderVector();
+    $orderable = $this->getOrderableColumns();
+
+    $keep = array();
+    foreach ($vector as $order) {
+      $column = $orderable[$order->getOrderKey()];
+
+      // If this is a Ferret fulltext column but the query doesn't actually
+      // have a fulltext query, we'll skip most of the Ferret stuff and won't
+      // actually have the columns in the result set. Just skip them.
+      if (!empty($column['requires-ferret'])) {
+        if (!$this->getFerretTokens()) {
+          continue;
+        }
+      }
+
+      $keep[] = $order->getAsScalar();
+    }
+
+    return PhabricatorQueryOrderVector::newFromVector($keep);
+  }
 
   /**
    * @task order
    */
   protected function formatOrderClause(
     AphrontDatabaseConnection $conn,
-    array $parts) {
+    array $parts,
+    $for_union = false) {
 
-    $is_query_reversed = false;
-    if ($this->getBeforeID()) {
-      $is_query_reversed = !$is_query_reversed;
-    }
+    $is_query_reversed = $this->getIsQueryOrderReversed();
 
     $sql = array();
     foreach ($parts as $key => $part) {
@@ -1075,6 +1288,13 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
 
       $table = idx($part, 'table');
+
+      // When we're building an ORDER BY clause for a sequence of UNION
+      // statements, we can't refer to tables from the subqueries.
+      if ($for_union) {
+        $table = null;
+      }
+
       $column = $part['column'];
 
       if ($table !== null) {
@@ -1114,7 +1334,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
     }
 
-    return qsprintf($conn, 'ORDER BY %Q', implode(', ', $sql));
+    return qsprintf($conn, 'ORDER BY %LQ', $sql);
   }
 
 
@@ -1139,12 +1359,29 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     PhabricatorCustomFieldIndexStorage $index,
     $value) {
 
+    $values = (array)$value;
+
+    $data_values = array();
+    $constraint_values = array();
+    foreach ($values as $value) {
+      if ($value instanceof PhabricatorQueryConstraint) {
+        $constraint_values[] = $value;
+      } else {
+        $data_values[] = $value;
+      }
+    }
+
+    $alias = 'appsearch_'.count($this->applicationSearchConstraints);
+
     $this->applicationSearchConstraints[] = array(
       'type'  => $index->getIndexValueType(),
       'cond'  => '=',
       'table' => $index->getTableName(),
       'index' => $index->getIndexKey(),
-      'value' => $value,
+      'alias' => $alias,
+      'value' => $values,
+      'data' => $data_values,
+      'constraints' => $constraint_values,
     );
 
     return $this;
@@ -1184,12 +1421,17 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           'int'));
     }
 
+    $alias = 'appsearch_'.count($this->applicationSearchConstraints);
+
     $this->applicationSearchConstraints[] = array(
       'type' => $index->getIndexValueType(),
       'cond' => 'range',
       'table' => $index->getTableName(),
       'index' => $index->getIndexKey(),
+      'alias' => $alias,
       'value' => array($min, $max),
+      'data' => null,
+      'constraints' => null,
     );
 
     return $this;
@@ -1204,17 +1446,18 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    * See @{method:getPrimaryTableAlias} if the column needs to be qualified with
    * a table alias.
    *
-   * @return string Column name.
+   * @param AphrontDatabaseConnection Connection executing queries.
+   * @return PhutilQueryString Column name.
    * @task appsearch
    */
-  protected function getApplicationSearchObjectPHIDColumn() {
-    if ($this->getPrimaryTableAlias()) {
-      $prefix = $this->getPrimaryTableAlias().'.';
-    } else {
-      $prefix = '';
-    }
+  protected function getApplicationSearchObjectPHIDColumn(
+    AphrontDatabaseConnection $conn) {
 
-    return $prefix.'phid';
+    if ($this->getPrimaryTableAlias()) {
+      return qsprintf($conn, '%T.phid', $this->getPrimaryTableAlias());
+    } else {
+      return qsprintf($conn, 'phid');
+    }
   }
 
 
@@ -1237,7 +1480,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           switch ($type) {
             case 'string':
             case 'int':
-              if (count((array)$value) > 1) {
+              if (count($value) > 1) {
                 return true;
               }
               break;
@@ -1268,15 +1511,15 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    * @task appsearch
    */
   protected function buildApplicationSearchGroupClause(
-    AphrontDatabaseConnection $conn_r) {
+    AphrontDatabaseConnection $conn) {
 
     if ($this->getApplicationSearchMayJoinMultipleRows()) {
       return qsprintf(
-        $conn_r,
+        $conn,
         'GROUP BY %Q',
-        $this->getApplicationSearchObjectPHIDColumn());
+        $this->getApplicationSearchObjectPHIDColumn($conn));
     } else {
-      return '';
+      return qsprintf($conn, '');
     }
   }
 
@@ -1290,49 +1533,39 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    * @task appsearch
    */
   protected function buildApplicationSearchJoinClause(
-    AphrontDatabaseConnection $conn_r) {
+    AphrontDatabaseConnection $conn) {
 
     $joins = array();
     foreach ($this->applicationSearchConstraints as $key => $constraint) {
       $table = $constraint['table'];
-      $alias = 'appsearch_'.$key;
+      $alias = $constraint['alias'];
       $index = $constraint['index'];
       $cond = $constraint['cond'];
-      $phid_column = $this->getApplicationSearchObjectPHIDColumn();
+      $phid_column = $this->getApplicationSearchObjectPHIDColumn($conn);
       switch ($cond) {
         case '=':
-          $type = $constraint['type'];
-          switch ($type) {
-            case 'string':
-              $constraint_clause = qsprintf(
-                $conn_r,
-                '%T.indexValue IN (%Ls)',
-                $alias,
-                (array)$constraint['value']);
+          // Figure out whether we need to do a LEFT JOIN or not. We need to
+          // LEFT JOIN if we're going to select "IS NULL" rows.
+          $join_type = qsprintf($conn, 'JOIN');
+          foreach ($constraint['constraints'] as $query_constraint) {
+            $op = $query_constraint->getOperator();
+            if ($op === PhabricatorQueryConstraint::OPERATOR_NULL) {
+              $join_type = qsprintf($conn, 'LEFT JOIN');
               break;
-            case 'int':
-              $constraint_clause = qsprintf(
-                $conn_r,
-                '%T.indexValue IN (%Ld)',
-                $alias,
-                (array)$constraint['value']);
-              break;
-            default:
-              throw new Exception(pht('Unknown index type "%s"!', $type));
+            }
           }
 
           $joins[] = qsprintf(
-            $conn_r,
-            'JOIN %T %T ON %T.objectPHID = %Q
-              AND %T.indexKey = %s
-              AND (%Q)',
+            $conn,
+            '%Q %T %T ON %T.objectPHID = %Q
+              AND %T.indexKey = %s',
+            $join_type,
             $table,
             $alias,
             $alias,
             $phid_column,
             $alias,
-            $index,
-            $constraint_clause);
+            $index);
           break;
         case 'range':
           list($min, $max) = $constraint['value'];
@@ -1343,19 +1576,19 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
           if ($min === null) {
             $constraint_clause = qsprintf(
-              $conn_r,
+              $conn,
               '%T.indexValue <= %d',
               $alias,
               $max);
           } else if ($max === null) {
             $constraint_clause = qsprintf(
-              $conn_r,
+              $conn,
               '%T.indexValue >= %d',
               $alias,
               $min);
           } else {
             $constraint_clause = qsprintf(
-              $conn_r,
+              $conn,
               '%T.indexValue BETWEEN %d AND %d',
               $alias,
               $min,
@@ -1363,7 +1596,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           }
 
           $joins[] = qsprintf(
-            $conn_r,
+            $conn,
             'JOIN %T %T ON %T.objectPHID = %Q
               AND %T.indexKey = %s
               AND (%Q)',
@@ -1380,7 +1613,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
     }
 
-    $phid_column = $this->getApplicationSearchObjectPHIDColumn();
+    $phid_column = $this->getApplicationSearchObjectPHIDColumn($conn);
     $orderable = $this->getOrderableColumns();
 
     $vector = $this->getOrderVector();
@@ -1395,7 +1628,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       $key = $spec['customfield.index.key'];
 
       $joins[] = qsprintf(
-        $conn_r,
+        $conn,
         'LEFT JOIN %T %T ON %T.objectPHID = %Q
           AND %T.indexKey = %s',
         $table,
@@ -1406,7 +1639,93 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
         $key);
     }
 
-    return implode(' ', $joins);
+    if ($joins) {
+      return qsprintf($conn, '%LJ', $joins);
+    } else {
+      return qsprintf($conn, '');
+    }
+  }
+
+  /**
+   * Construct a WHERE clause appropriate for applying ApplicationSearch
+   * constraints.
+   *
+   * @param AphrontDatabaseConnection Connection executing the query.
+   * @return list<string> Where clause parts.
+   * @task appsearch
+   */
+  protected function buildApplicationSearchWhereClause(
+    AphrontDatabaseConnection $conn) {
+
+    $where = array();
+
+    foreach ($this->applicationSearchConstraints as $key => $constraint) {
+      $alias = $constraint['alias'];
+      $cond = $constraint['cond'];
+      $type = $constraint['type'];
+
+      $data_values = $constraint['data'];
+      $constraint_values = $constraint['constraints'];
+
+      $constraint_parts = array();
+      switch ($cond) {
+        case '=':
+          if ($data_values) {
+            switch ($type) {
+              case 'string':
+                $constraint_parts[] = qsprintf(
+                  $conn,
+                  '%T.indexValue IN (%Ls)',
+                  $alias,
+                  $data_values);
+                break;
+              case 'int':
+                $constraint_parts[] = qsprintf(
+                  $conn,
+                  '%T.indexValue IN (%Ld)',
+                  $alias,
+                  $data_values);
+                break;
+              default:
+                throw new Exception(pht('Unknown index type "%s"!', $type));
+            }
+          }
+
+          if ($constraint_values) {
+            foreach ($constraint_values as $value) {
+              $op = $value->getOperator();
+              switch ($op) {
+                case PhabricatorQueryConstraint::OPERATOR_NULL:
+                  $constraint_parts[] = qsprintf(
+                    $conn,
+                    '%T.indexValue IS NULL',
+                    $alias);
+                  break;
+                case PhabricatorQueryConstraint::OPERATOR_ANY:
+                  $constraint_parts[] = qsprintf(
+                    $conn,
+                    '%T.indexValue IS NOT NULL',
+                    $alias);
+                  break;
+                default:
+                  throw new Exception(
+                    pht(
+                      'No support for applying operator "%s" against '.
+                      'index of type "%s".',
+                      $op,
+                      $type));
+              }
+            }
+          }
+
+          if ($constraint_parts) {
+            $where[] = qsprintf($conn, '%LO', $constraint_parts);
+          }
+          break;
+      }
+    }
+
+    return $where;
   }
 
 
@@ -1504,34 +1823,48 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     $this->ferretEngine = $engine;
     $this->ferretTokens = $fulltext_tokens;
 
-    $current_function = $engine->getDefaultFunctionKey();
+    $op_absent = PhutilSearchQueryCompiler::OPERATOR_ABSENT;
+
+    $default_function = $engine->getDefaultFunctionKey();
     $table_map = array();
     $idx = 1;
     foreach ($this->ferretTokens as $fulltext_token) {
       $raw_token = $fulltext_token->getToken();
-      $function = $raw_token->getFunction();
 
+      $function = $raw_token->getFunction();
       if ($function === null) {
-        $function = $current_function;
+        $function = $default_function;
       }
 
-      $raw_field = $engine->getFieldForFunction($function);
+      $function_def = $engine->getFunctionForName($function);
+
+      // NOTE: The query compiler guarantees that a query can not make a
+      // field both "present" and "absent", so it's safe to just use the
+      // first operator we encounter to determine whether the table is
+      // optional or not.
+
+      $operator = $raw_token->getOperator();
+      $is_optional = ($operator === $op_absent);
 
       if (!isset($table_map[$function])) {
         $alias = 'ftfield_'.$idx++;
         $table_map[$function] = array(
           'alias' => $alias,
-          'key' => $raw_field,
+          'function' => $function_def,
+          'optional' => $is_optional,
         );
       }
-
-      $current_function = $function;
     }
 
     // Join the title field separately so we can rank results.
     $table_map['rank'] = array(
       'alias' => 'ft_rank',
-      'key' => PhabricatorSearchDocumentFieldType::FIELD_TITLE,
+      'function' => $engine->getFunctionForName('title'),
+
+      // See T13345. Not every document has a title, so we want to LEFT JOIN
+      // this table to avoid excluding documents with no title that match
+      // the query in other fields.
+      'optional' => true,
     );
 
     $this->ferretTables = $table_map;
@@ -1546,8 +1879,16 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       return $select;
     }
 
+    if (!$this->hasFerretOrder()) {
+      // We only need to SELECT the virtual rank/relevance columns if we're
+      // actually sorting the results by rank.
+      return $select;
+    }
+
     if (!$this->ferretEngine) {
-      $select[] = '0 _ft_rank';
+      $select[] = qsprintf($conn, '0 AS %T', self::FULLTEXT_RANK);
+      $select[] = qsprintf($conn, '0 AS %T', self::FULLTEXT_CREATED);
+      $select[] = qsprintf($conn, '0 AS %T', self::FULLTEXT_MODIFIED);
       return $select;
     }
 
@@ -1613,12 +1954,40 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
     }
 
-    $parts[] = '0';
+    $parts[] = qsprintf($conn, '%d', 0);
+
+    $sum = array_shift($parts);
+    foreach ($parts as $part) {
+      $sum = qsprintf(
+        $conn,
+        '%Q + %Q',
+        $sum,
+        $part);
+    }
 
     $select[] = qsprintf(
       $conn,
-      '%Q _ft_rank',
-      implode(' + ', $parts));
+      '%Q AS %T',
+      $sum,
+      self::FULLTEXT_RANK);
+
+    // See D20297. We select these as real columns in the result set so that
+    // constructions like this will work:
+    //
+    //   ((SELECT ...) UNION (SELECT ...)) ORDER BY ...
+    //
+    // If the columns aren't part of the result set, the final "ORDER BY" can
+    // not act on them.
+
+    $select[] = qsprintf(
+      $conn,
+      'ft_doc.epochCreated AS %T',
+      self::FULLTEXT_CREATED);
+
+    $select[] = qsprintf(
+      $conn,
+      'ft_doc.epochModified AS %T',
+      self::FULLTEXT_MODIFIED);
 
     return $select;
   }
@@ -1630,21 +1999,32 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
     $op_sub = PhutilSearchQueryCompiler::OPERATOR_SUBSTRING;
     $op_not = PhutilSearchQueryCompiler::OPERATOR_NOT;
+    $op_absent = PhutilSearchQueryCompiler::OPERATOR_ABSENT;
+    $op_present = PhutilSearchQueryCompiler::OPERATOR_PRESENT;
 
     $engine = $this->ferretEngine;
     $stemmer = $engine->newStemmer();
 
     $ngram_table = $engine->getNgramsTableName();
+    $ngram_engine = $this->getNgramEngine();
 
     $flat = array();
     foreach ($this->ferretTokens as $fulltext_token) {
       $raw_token = $fulltext_token->getToken();
 
+      $operator = $raw_token->getOperator();
+
       // If this is a negated term like "-pomegranate", don't join the ngram
       // table since we aren't looking for documents with this term. (We could
       // LEFT JOIN the table and require a NULL row, but this is probably more
       // trouble than it's worth.)
-      if ($raw_token->getOperator() == $op_not) {
+      if ($operator === $op_not) {
+        continue;
+      }
+
+      // Neither the "present" or "absent" operators benefit from joining
+      // the ngram table.
+      if ($operator === $op_absent || $operator === $op_present) {
         continue;
       }
 
@@ -1675,10 +2055,10 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
 
       if ($is_substring) {
-        $ngrams = $engine->getSubstringNgramsFromString($value);
+        $ngrams = $ngram_engine->getSubstringNgramsFromString($value);
       } else {
         $terms_value = $engine->newTermsCorpus($value);
-        $ngrams = $engine->getTermNgramsFromString($terms_value);
+        $ngrams = $ngram_engine->getTermNgramsFromString($terms_value);
 
         // If this is a stemmed term, only look for ngrams present in both the
         // unstemmed and stemmed variations.
@@ -1687,7 +2067,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           // is (or, at least, may be) a normal word and activates.
           $terms_value = trim($terms_value, ' ');
           $stem_value = $stemmer->stemToken($terms_value);
-          $stem_ngrams = $engine->getTermNgramsFromString($stem_value);
+          $stem_ngrams = $ngram_engine->getTermNgramsFromString($stem_value);
           $ngrams = array_intersect($ngrams, $stem_ngrams);
         }
       }
@@ -1697,6 +2077,34 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
           'table' => $ngram_table,
           'ngram' => $ngram,
         );
+      }
+    }
+
+    // Remove common ngrams, like "the", which occur too frequently in
+    // documents to be useful in constraining the query. The best ngrams
+    // are obscure sequences which occur in very few documents.
+
+    if ($flat) {
+      $common_ngrams = queryfx_all(
+        $conn,
+        'SELECT ngram FROM %T WHERE ngram IN (%Ls)',
+        $engine->getCommonNgramsTableName(),
+        ipull($flat, 'ngram'));
+      $common_ngrams = ipull($common_ngrams, 'ngram', 'ngram');
+
+      foreach ($flat as $key => $spec) {
+        $ngram = $spec['ngram'];
+        if (isset($common_ngrams[$ngram])) {
+          unset($flat[$key]);
+          continue;
+        }
+
+        // NOTE: MySQL discards trailing whitespace in CHAR(X) columns.
+        $trim_ngram = rtrim($ngram, ' ');
+        if (isset($common_ngrams[$trim_ngram])) {
+          unset($flat[$key]);
+          continue;
+        }
       }
     }
 
@@ -1743,18 +2151,55 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
         $ngram);
     }
 
+    $object = $this->newResultObject();
+    if (!$object) {
+      throw new Exception(
+        pht(
+          'Query class ("%s") must define "newResultObject()" to use '.
+          'Ferret constraints.',
+          get_class($this)));
+    }
+
+    // See T13511. If we have a fulltext query which uses valid field
+    // functions, but at least one of the functions applies to a field which
+    // the object can never have, the query can never match anything. Detect
+    // this and return an empty result set.
+
+    // (Even if the query is "field is absent" or "field does not contain
+    // such-and-such", the interpretation is that these constraints are
+    // not meaningful when applied to an object which can never have the
+    // field.)
+
+    $functions = ipull($this->ferretTables, 'function');
+    $functions = mpull($functions, null, 'getFerretFunctionName');
+    foreach ($functions as $function) {
+      if (!$function->supportsObject($object)) {
+        throw new PhabricatorEmptyQueryException(
+          pht(
+            'This query uses a fulltext function which this document '.
+            'type does not support.'));
+      }
+    }
+
     foreach ($this->ferretTables as $table) {
       $alias = $table['alias'];
 
+      if (empty($table['optional'])) {
+        $join_type = qsprintf($conn, 'JOIN');
+      } else {
+        $join_type = qsprintf($conn, 'LEFT JOIN');
+      }
+
       $joins[] = qsprintf(
         $conn,
-        'JOIN %T %T ON ft_doc.id = %T.documentID
+        '%Q %T %T ON ft_doc.id = %T.documentID
           AND %T.fieldKey = %s',
+        $join_type,
         $field_table,
         $alias,
         $alias,
         $alias,
-        $table['key']);
+        $table['function']->getFerretFieldKey());
     }
 
     return $joins;
@@ -1771,27 +2216,70 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
     $op_sub = PhutilSearchQueryCompiler::OPERATOR_SUBSTRING;
     $op_not = PhutilSearchQueryCompiler::OPERATOR_NOT;
+    $op_exact = PhutilSearchQueryCompiler::OPERATOR_EXACT;
+    $op_absent = PhutilSearchQueryCompiler::OPERATOR_ABSENT;
+    $op_present = PhutilSearchQueryCompiler::OPERATOR_PRESENT;
 
     $where = array();
-    $current_function = 'all';
+    $default_function = $engine->getDefaultFunctionKey();
     foreach ($this->ferretTokens as $fulltext_token) {
       $raw_token = $fulltext_token->getToken();
       $value = $raw_token->getValue();
 
       $function = $raw_token->getFunction();
       if ($function === null) {
-        $function = $current_function;
+        $function = $default_function;
       }
-      $current_function = $function;
+
+      $operator = $raw_token->getOperator();
 
       $table_alias = $table_map[$function]['alias'];
 
-      $is_not = ($raw_token->getOperator() == $op_not);
+      // If this is a "field is present" operator, we've already implicitly
+      // guaranteed this by JOINing the table. We don't need to do any
+      // more work.
+      $is_present = ($operator === $op_present);
+      if ($is_present) {
+        continue;
+      }
 
-      if ($raw_token->getOperator() == $op_sub) {
+      // If this is a "field is absent" operator, we just want documents
+      // which failed to match to a row when we LEFT JOINed the table. This
+      // means there's no index for the field.
+      $is_absent = ($operator === $op_absent);
+      if ($is_absent) {
+        $where[] = qsprintf(
+          $conn,
+          '(%T.rawCorpus IS NULL)',
+          $table_alias);
+        continue;
+      }
+
+      $is_not = ($operator === $op_not);
+
+      if ($operator == $op_sub) {
         $is_substring = true;
       } else {
         $is_substring = false;
+      }
+
+      // If we're doing exact search, just test the raw corpus.
+      $is_exact = ($operator === $op_exact);
+      if ($is_exact) {
+        if ($is_not) {
+          $where[] = qsprintf(
+            $conn,
+            '(%T.rawCorpus != %s)',
+            $table_alias,
+            $value);
+        } else {
+          $where[] = qsprintf(
+            $conn,
+            '(%T.rawCorpus = %s)',
+            $table_alias,
+            $value);
+        }
+        continue;
       }
 
       // If we're doing substring search, we just match against the raw corpus
@@ -1860,20 +2348,20 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       if ($is_not) {
         $where[] = qsprintf(
           $conn,
-          '(%Q)',
-          implode(' AND ', $term_constraints));
+          '%LA',
+          $term_constraints);
       } else if ($is_quoted) {
         $where[] = qsprintf(
           $conn,
-          '(%T.rawCorpus LIKE %~ AND (%Q))',
+          '(%T.rawCorpus LIKE %~ AND %LO)',
           $table_alias,
           $value,
-          implode(' OR ', $term_constraints));
+          $term_constraints);
       } else {
         $where[] = qsprintf(
           $conn,
-          '(%Q)',
-          implode(' OR ', $term_constraints));
+          '%LO',
+          $term_constraints);
       }
     }
 
@@ -1974,30 +2462,31 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
 
   protected function buildNgramsJoinClause(AphrontDatabaseConnection $conn) {
+    $ngram_engine = $this->getNgramEngine();
+
     $flat = array();
     foreach ($this->ngrams as $spec) {
-      $index = $spec['index'];
-      $value = $spec['value'];
       $length = $spec['length'];
 
-      if ($length >= 3) {
-        $ngrams = $index->getNgramsFromString($value, 'query');
-        $prefix = false;
-      } else if ($length == 2) {
-        $ngrams = $index->getNgramsFromString($value, 'prefix');
-        $prefix = false;
-      } else {
-        $ngrams = array(' '.$value);
-        $prefix = true;
+      if ($length < 3) {
+        continue;
       }
+
+      $index = $spec['index'];
+      $value = $spec['value'];
+
+      $ngrams = $ngram_engine->getSubstringNgramsFromString($value);
 
       foreach ($ngrams as $ngram) {
         $flat[] = array(
           'table' => $index->getTableName(),
           'ngram' => $ngram,
-          'prefix' => $prefix,
         );
       }
+    }
+
+    if (!$flat) {
+      return array();
     }
 
     // MySQL only allows us to join a maximum of 61 tables per query. Each
@@ -2021,31 +2510,18 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     foreach ($flat as $spec) {
       $table = $spec['table'];
       $ngram = $spec['ngram'];
-      $prefix = $spec['prefix'];
 
       $alias = 'ngm'.$idx++;
 
-      if ($prefix) {
-        $joins[] = qsprintf(
-          $conn,
-          'JOIN %T %T ON %T.objectID = %Q AND %T.ngram LIKE %>',
-          $table,
-          $alias,
-          $alias,
-          $id_column,
-          $alias,
-          $ngram);
-      } else {
-        $joins[] = qsprintf(
-          $conn,
-          'JOIN %T %T ON %T.objectID = %Q AND %T.ngram = %s',
-          $table,
-          $alias,
-          $alias,
-          $id_column,
-          $alias,
-          $ngram);
-      }
+      $joins[] = qsprintf(
+        $conn,
+        'JOIN %T %T ON %T.objectID = %Q AND %T.ngram = %s',
+        $table,
+        $alias,
+        $alias,
+        $id_column,
+        $alias,
+        $ngram);
     }
 
     return $joins;
@@ -2054,6 +2530,8 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
   protected function buildNgramsWhereClause(AphrontDatabaseConnection $conn) {
     $where = array();
+
+    $ngram_engine = $this->getNgramEngine();
 
     foreach ($this->ngrams as $ngram) {
       $index = $ngram['index'];
@@ -2067,7 +2545,8 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
         $column = qsprintf($conn, '%T', $column);
       }
 
-      $tokens = $index->tokenizeString($value);
+      $tokens = $ngram_engine->tokenizeNgramString($value);
+
       foreach ($tokens as $token) {
         $where[] = qsprintf(
           $conn,
@@ -2083,6 +2562,14 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
 
   protected function shouldGroupNgramResultRows() {
     return (bool)$this->ngrams;
+  }
+
+  private function getNgramEngine() {
+    if (!$this->ngramEngine) {
+      $this->ngramEngine = new PhabricatorSearchNgramEngine();
+    }
+
+    return $this->ngramEngine;
   }
 
 
@@ -2182,7 +2669,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
                   (array)$constraint->getValue(),
                   $idx++);
               }
-              $parts = implode(', ', $parts);
+              $parts = qsprintf($conn, '%LQ', $parts);
 
               $select[] = qsprintf(
                 $conn,
@@ -2206,7 +2693,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
    */
   public function buildEdgeLogicJoinClause(AphrontDatabaseConnection $conn) {
     $edge_table = PhabricatorEdgeConfig::TABLE_NAME_EDGE;
-    $phid_column = $this->getApplicationSearchObjectPHIDColumn();
+    $phid_column = $this->getApplicationSearchObjectPHIDColumn($conn);
 
     $joins = array();
     foreach ($this->edgeLogicConstraints as $type => $constraints) {
@@ -2269,9 +2756,9 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
             // this to a LEFT join. We'll use WHERE to select matching rows
             // later.
             if ($has_null) {
-              $join_type = 'LEFT';
+              $join_type = qsprintf($conn, 'LEFT');
             } else {
-              $join_type = '';
+              $join_type = qsprintf($conn, '');
             }
 
             $joins[] = qsprintf(
@@ -2364,9 +2851,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
 
       if ($full && $null) {
-        $full = $this->formatWhereSubclause($full);
-        $null = $this->formatWhereSubclause($null);
-        $where[] = qsprintf($conn, '(%Q OR %Q)', $full, $null);
+        $where[] = qsprintf($conn, '(%LA OR %LA)', $full, $null);
       } else if ($full) {
         foreach ($full as $condition) {
           $where[] = $condition;
@@ -2673,6 +3158,13 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
       }
     }
 
+    // See T13240. If this query raises policy exceptions, don't filter objects
+    // in the MySQL layer. We want them to reach the application layer so we
+    // can reject them and raise an exception.
+    if ($this->shouldRaisePolicyExceptions()) {
+      return null;
+    }
+
     $space_phids = array();
     $include_null = false;
 
@@ -2746,7 +3238,7 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
     if ($alias) {
       $col = qsprintf($conn, '%T.spacePHID', $alias);
     } else {
-      $col = 'spacePHID';
+      $col = qsprintf($conn, 'spacePHID');
     }
 
     if ($space_phids && $include_null) {
@@ -2768,6 +3260,24 @@ abstract class PhabricatorCursorPagedPolicyAwareQuery
         '%Q IS NULL',
         $col);
     }
+  }
+
+  private function hasFerretOrder() {
+    $vector = $this->getOrderVector();
+
+    if ($vector->containsKey('rank')) {
+      return true;
+    }
+
+    if ($vector->containsKey('fulltext-created')) {
+      return true;
+    }
+
+    if ($vector->containsKey('fulltext-modified')) {
+      return true;
+    }
+
+    return false;
   }
 
 }

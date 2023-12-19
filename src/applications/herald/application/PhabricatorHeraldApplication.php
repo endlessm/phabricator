@@ -28,6 +28,10 @@ final class PhabricatorHeraldApplication extends PhabricatorApplication {
         'name' => pht('Herald User Guide'),
         'href' => PhabricatorEnv::getDoclink('Herald User Guide'),
       ),
+      array(
+        'name' => pht('User Guide: Webhooks'),
+        'href' => PhabricatorEnv::getDoclink('User Guide: Webhooks'),
+      ),
     );
   }
 
@@ -53,14 +57,23 @@ final class PhabricatorHeraldApplication extends PhabricatorApplication {
         'new/' => 'HeraldNewController',
         'create/' => 'HeraldNewController',
         'edit/(?:(?P<id>[1-9]\d*)/)?' => 'HeraldRuleController',
-        'disable/(?P<id>[1-9]\d*)/(?P<action>\w+)/'
+        'disable/(?P<id>[1-9]\d*)/(?P<action>[^/]+)/'
           => 'HeraldDisableController',
         'test/' => 'HeraldTestConsoleController',
         'transcript/' => array(
           '' => 'HeraldTranscriptListController',
           '(?:query/(?P<queryKey>[^/]+)/)?' => 'HeraldTranscriptListController',
-          '(?P<id>[1-9]\d*)/'
+          '(?P<id>[1-9]\d*)/(?:(?P<view>[^/]+)/)?'
             => 'HeraldTranscriptController',
+        ),
+        'webhook/' => array(
+          $this->getQueryRoutePattern() => 'HeraldWebhookListController',
+          'view/(?P<id>\d+)/(?:request/(?P<requestID>[^/]+)/)?' =>
+            'HeraldWebhookViewController',
+          $this->getEditRoutePattern('edit/') => 'HeraldWebhookEditController',
+          'test/(?P<id>\d+)/' => 'HeraldWebhookTestController',
+          'key/(?P<action>view|cycle)/(?P<id>\d+)/' =>
+            'HeraldWebhookKeyController',
         ),
       ),
     );
@@ -70,6 +83,9 @@ final class PhabricatorHeraldApplication extends PhabricatorApplication {
     return array(
       HeraldManageGlobalRulesCapability::CAPABILITY => array(
         'caption' => pht('Global rules can bypass access controls.'),
+        'default' => PhabricatorPolicies::POLICY_ADMIN,
+      ),
+      HeraldCreateWebhooksCapability::CAPABILITY => array(
         'default' => PhabricatorPolicies::POLICY_ADMIN,
       ),
     );

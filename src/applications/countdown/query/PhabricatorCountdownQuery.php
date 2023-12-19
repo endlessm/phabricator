@@ -28,10 +28,6 @@ final class PhabricatorCountdownQuery
     return $this;
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
-  }
-
   public function newResultObject() {
     return new PhabricatorCountdown();
   }
@@ -97,11 +93,10 @@ final class PhabricatorCountdownQuery
     ) + parent::getOrderableColumns();
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $countdown = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      'epoch' => $countdown->getEpoch(),
-      'id' => $countdown->getID(),
+      'id' => (int)$object->getID(),
+      'epoch' => (int)$object->getEpoch(),
     );
   }
 

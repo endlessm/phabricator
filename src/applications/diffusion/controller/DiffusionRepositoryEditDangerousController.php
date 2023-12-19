@@ -23,14 +23,15 @@ final class DiffusionRepositoryEditDangerousController
         ->appendParagraph(
           pht(
             'This repository can not be protected from dangerous changes '.
-            'because Phabricator does not control what users are allowed '.
+            'because this server does not control what users are allowed '.
             'to push to it.'))
         ->addCancelButton($panel_uri);
     }
 
     if ($request->isFormPost()) {
       $xaction = id(new PhabricatorRepositoryTransaction())
-        ->setTransactionType(PhabricatorRepositoryTransaction::TYPE_DANGEROUS)
+        ->setTransactionType(
+          PhabricatorRepositoryDangerousTransaction::TRANSACTIONTYPE)
         ->setNewValue(!$repository->shouldAllowDangerousChanges());
 
       $editor = id(new PhabricatorRepositoryEditor())

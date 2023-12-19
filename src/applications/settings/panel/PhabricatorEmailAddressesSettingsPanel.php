@@ -11,6 +11,10 @@ final class PhabricatorEmailAddressesSettingsPanel
     return pht('Email Addresses');
   }
 
+  public function getPanelMenuIcon() {
+    return 'fa-at';
+  }
+
   public function getPanelGroupKey() {
     return PhabricatorSettingsEmailPanelGroup::PANELGROUPKEY;
   }
@@ -27,8 +31,7 @@ final class PhabricatorEmailAddressesSettingsPanel
     $user = $this->getUser();
     $editable = PhabricatorEnv::getEnvConfig('account.editable');
 
-    $uri = $request->getRequestURI();
-    $uri->setQueryParams(array());
+    $uri = new PhutilURI($request->getPath());
 
     if ($editable) {
       $new = $request->getStr('new');
@@ -138,9 +141,9 @@ final class PhabricatorEmailAddressesSettingsPanel
         $editable,
       ));
 
-    $button = null;
+    $buttons = array();
     if ($editable) {
-      $button = id(new PHUIButtonView())
+      $buttons[] = id(new PHUIButtonView())
         ->setTag('a')
         ->setIcon('fa-plus')
         ->setText(pht('Add New Address'))
@@ -149,7 +152,7 @@ final class PhabricatorEmailAddressesSettingsPanel
         ->setColor(PHUIButtonView::GREY);
     }
 
-    return $this->newBox(pht('Email Addresses'), $table, array($button));
+    return $this->newBox(pht('Email Addresses'), $table, $buttons);
   }
 
   private function returnNewAddressResponse(
@@ -395,8 +398,9 @@ final class PhabricatorEmailAddressesSettingsPanel
       ->setTitle(pht('Change primary email address?'))
       ->appendParagraph(
         pht(
-          'If you change your primary address, Phabricator will send all '.
+          'If you change your primary address, %s will send all '.
           'email to %s.',
+          PlatformSymbols::getPlatformServerName(),
           $address))
       ->appendParagraph(
         pht(

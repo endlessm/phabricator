@@ -6,12 +6,15 @@ final class DifferentialRevisionReopenTransaction
   const TRANSACTIONTYPE = 'differential.revision.reopen';
   const ACTIONKEY = 'reopen';
 
-  protected function getRevisionActionLabel() {
+  protected function getRevisionActionLabel(
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('Reopen Revision');
   }
 
   protected function getRevisionActionDescription(
-    DifferentialRevision $revision) {
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('This revision will be reopened for review.');
   }
 
@@ -70,6 +73,14 @@ final class DifferentialRevisionReopenTransaction
       '%s reopened %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'reopen';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

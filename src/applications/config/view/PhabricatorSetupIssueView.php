@@ -90,14 +90,14 @@ final class PhabricatorSetupIssueView extends AphrontView {
 
       $fallback_info = pht(
         "If those commands don't work, try Google. The process of installing ".
-        "PHP extensions is not specific to Phabricator, and any instructions ".
-        "you can find for installing them on your system should work. On Mac ".
-        "OS X, you might want to try Homebrew.");
+        "PHP extensions is not specific to this software, and any ".
+        "instructions you can find for installing them on your system should ".
+        "work. On Mac OS X, you might want to try Homebrew.");
 
       $restart_info = pht(
-        'After installing new PHP extensions, <strong>restart Phabricator '.
+        'After installing new PHP extensions, <strong>restart everything '.
         'for the changes to take effect</strong>. For help with restarting '.
-        'Phabricator, see %s in the documentation.',
+        'everything, see %s in the documentation.',
         $this->renderRestartLink());
 
       $description[] = phutil_tag(
@@ -249,7 +249,7 @@ final class PhabricatorSetupIssueView extends AphrontView {
       'p',
       array(),
       pht(
-        'The current Phabricator configuration has these %d value(s):',
+        'The current configuration has these %d value(s):',
         count($configs)));
 
     $options = PhabricatorApplicationConfigOptions::loadAllOptions();
@@ -284,7 +284,7 @@ final class PhabricatorSetupIssueView extends AphrontView {
       $update = array();
       foreach ($configs as $key) {
         $update[] = hsprintf(
-          '<tt>phabricator/ $</tt> ./bin/config set %s <em>value</em>',
+          '<tt>$</tt> ./bin/config set %s <em>value</em>',
           $key);
       }
       $update = phutil_tag('pre', array(), phutil_implode_html("\n", $update));
@@ -445,7 +445,7 @@ final class PhabricatorSetupIssueView extends AphrontView {
         'p',
         array(),
         pht(
-          'You can find more information about configuring OPCache in '.
+          'You can find more information about configuring OPcache in '.
           'the %s.',
           phutil_tag(
             'a',
@@ -453,16 +453,16 @@ final class PhabricatorSetupIssueView extends AphrontView {
               'href' => 'http://php.net/manual/opcache.configuration.php',
               'target' => '_blank',
             ),
-            pht('PHP OPCache Documentation'))));
+            pht('PHP OPcache Documentation'))));
     }
 
     $info[] = phutil_tag(
       'p',
       array(),
       pht(
-        'After editing the PHP configuration, <strong>restart Phabricator for '.
+        'After editing the PHP configuration, <strong>restart everything for '.
         'the changes to take effect</strong>. For help with restarting '.
-        'Phabricator, see %s in the documentation.',
+        'everything, see %s in the documentation.',
         $this->renderRestartLink()));
 
     return phutil_tag(

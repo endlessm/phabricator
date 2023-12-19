@@ -8,6 +8,7 @@ final class PhabricatorProfileMenuItemConfigurationQuery
   private $profilePHIDs;
   private $customPHIDs;
   private $includeGlobal;
+  private $affectedObjectPHIDs;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -30,12 +31,13 @@ final class PhabricatorProfileMenuItemConfigurationQuery
     return $this;
   }
 
-  public function newResultObject() {
-    return new PhabricatorProfileMenuItemConfiguration();
+  public function withAffectedObjectPHIDs(array $phids) {
+    $this->affectedObjectPHIDs = $phids;
+    return $this;
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
+  public function newResultObject() {
+    return new PhabricatorProfileMenuItemConfiguration();
   }
 
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
@@ -44,21 +46,21 @@ final class PhabricatorProfileMenuItemConfigurationQuery
     if ($this->ids !== null) {
       $where[] = qsprintf(
         $conn,
-        'id IN (%Ld)',
+        'config.id IN (%Ld)',
         $this->ids);
     }
 
     if ($this->phids !== null) {
       $where[] = qsprintf(
         $conn,
-        'phid IN (%Ls)',
+        'config.phid IN (%Ls)',
         $this->phids);
     }
 
     if ($this->profilePHIDs !== null) {
       $where[] = qsprintf(
         $conn,
-        'profilePHID IN (%Ls)',
+        'config.profilePHID IN (%Ls)',
         $this->profilePHIDs);
     }
 
@@ -66,21 +68,43 @@ final class PhabricatorProfileMenuItemConfigurationQuery
       if ($this->customPHIDs && $this->includeGlobal) {
         $where[] = qsprintf(
           $conn,
-          'customPHID IN (%Ls) OR customPHID IS NULL',
+          'config.customPHID IN (%Ls) OR config.customPHID IS NULL',
           $this->customPHIDs);
       } else if ($this->customPHIDs) {
         $where[] = qsprintf(
           $conn,
-          'customPHID IN (%Ls)',
+          'config.customPHID IN (%Ls)',
           $this->customPHIDs);
       } else {
         $where[] = qsprintf(
           $conn,
-          'customPHID IS NULL');
+          'config.customPHID IS NULL');
       }
     }
 
+    if ($this->affectedObjectPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'affected.dst IN (%Ls)',
+        $this->affectedObjectPHIDs);
+    }
+
     return $where;
+  }
+
+  protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
+    $joins = parent::buildJoinClauseParts($conn);
+
+    if ($this->affectedObjectPHIDs !== null) {
+      $joins[] = qsprintf(
+        $conn,
+        'JOIN %T affected ON affected.src = config.phid
+          AND affected.type = %d',
+        PhabricatorEdgeConfig::TABLE_NAME_EDGE,
+        PhabricatorProfileMenuItemAffectsObjectEdgeType::EDGECONST);
+    }
+
+    return $joins;
   }
 
   protected function willFilterPage(array $page) {
@@ -126,6 +150,10 @@ final class PhabricatorProfileMenuItemConfigurationQuery
 
   public function getQueryApplicationClass() {
     return 'PhabricatorSearchApplication';
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'config';
   }
 
 }

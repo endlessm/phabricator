@@ -9,10 +9,6 @@ final class PhabricatorUSEnglishTranslation
 
   protected function getTranslations() {
     return array(
-      'No daemon(s) with id(s) "%s" exist!' => array(
-        'No daemon with id %s exists!',
-        'No daemons with ids %s exist!',
-      ),
       'These %d configuration value(s) are related:' => array(
         'This configuration value is related:',
         'These configuration values are related:',
@@ -595,68 +591,78 @@ final class PhabricatorUSEnglishTranslation
         '%s changed files, attached: %3$s; detached: %5$s.',
 
 
-      '%s added %s dependencie(s): %s.' => array(
+      '%s added %s parent revision(s): %s.' => array(
         array(
-          '%s added a dependency: %3$s.',
-          '%s added dependencies: %3$s.',
+          '%s added a parent revision: %3$s.',
+          '%s added parent revisions: %3$s.',
         ),
       ),
 
-      '%s added %s dependencie(s) for %s: %s.' => array(
+      '%s added %s parent revision(s) for %s: %s.' => array(
         array(
-          '%s added a dependency for %3$s: %4$s.',
-          '%s added dependencies for %3$s: %4$s.',
+          '%s added a parent revision for %3$s: %4$s.',
+          '%s added parent revisions for %3$s: %4$s.',
         ),
       ),
 
-      '%s removed %s dependencie(s): %s.' => array(
+      '%s removed %s parent revision(s): %s.' => array(
         array(
-          '%s removed a dependency: %3$s.',
-          '%s removed dependencies: %3$s.',
+          '%s removed a parent revision: %3$s.',
+          '%s removed parent revisions: %3$s.',
         ),
       ),
 
-      '%s removed %s dependencie(s) for %s: %s.' => array(
+      '%s removed %s parent revision(s) for %s: %s.' => array(
         array(
-          '%s removed a dependency for %3$s: %4$s.',
-          '%s removed dependencies for %3$s: %4$s.',
+          '%s removed a parent revision for %3$s: %4$s.',
+          '%s removed parent revisions for %3$s: %4$s.',
         ),
       ),
 
-      '%s edited dependencie(s), added %s: %s; removed %s: %s.' => array(
-        '%s edited dependencies, added: %3$s; removed: %5$s.',
+      '%s edited parent revision(s), added %s: %s; removed %s: %s.' => array(
+        '%s edited parent revisions, added: %3$s; removed: %5$s.',
       ),
 
-      '%s edited dependencie(s) for %s, added %s: %s; removed %s: %s.' => array(
-        '%s edited dependencies for %s, added: %3$s; removed: %5$s.',
+      '%s edited parent revision(s) for %s, '.
+      'added %s: %s; removed %s: %s.' => array(
+        '%s edited parent revisions for %s, added: %3$s; removed: %5$s.',
       ),
 
-      '%s added %s dependent revision(s): %s.' => array(
+      '%s added %s child revision(s): %s.' => array(
         array(
-          '%s added a dependent revision: %3$s.',
-          '%s added dependent revisions: %3$s.',
+          '%s added a child revision: %3$s.',
+          '%s added child revisions: %3$s.',
         ),
       ),
 
-      '%s added %s dependent revision(s) for %s: %s.' => array(
+      '%s added %s child revision(s) for %s: %s.' => array(
         array(
-          '%s added a dependent revision for %3$s: %4$s.',
-          '%s added dependent revisions for %3$s: %4$s.',
+          '%s added a child revision for %3$s: %4$s.',
+          '%s added child revisions for %3$s: %4$s.',
         ),
       ),
 
-      '%s removed %s dependent revision(s): %s.' => array(
+      '%s removed %s child revision(s): %s.' => array(
         array(
-          '%s removed a dependent revision: %3$s.',
-          '%s removed dependent revisions: %3$s.',
+          '%s removed a child revision: %3$s.',
+          '%s removed child revisions: %3$s.',
         ),
       ),
 
-      '%s removed %s dependent revision(s) for %s: %s.' => array(
+      '%s removed %s child revision(s) for %s: %s.' => array(
         array(
-          '%s removed a dependent revision for %3$s: %4$s.',
-          '%s removed dependent revisions for %3$s: %4$s.',
+          '%s removed a child revision for %3$s: %4$s.',
+          '%s removed child revisions for %3$s: %4$s.',
         ),
+      ),
+
+      '%s edited child revision(s), added %s: %s; removed %s: %s.' => array(
+        '%s edited child revisions, added: %3$s; removed: %5$s.',
+      ),
+
+      '%s edited child revision(s) for %s, '.
+      'added %s: %s; removed %s: %s.' => array(
+        '%s edited child revisions for %s, added: %3$s; removed: %5$s.',
       ),
 
       '%s added %s commit(s): %s.' => array(
@@ -676,73 +682,73 @@ final class PhabricatorUSEnglishTranslation
       '%s edited commit(s), added %s: %s; removed %s: %s.' =>
         '%s edited commits, added %3$s; removed %5$s.',
 
-      '%s added %s reverted commit(s): %s.' => array(
+      '%s added %s reverted change(s): %s.' => array(
         array(
-          '%s added a reverted commit: %3$s.',
-          '%s added reverted commits: %3$s.',
+          '%s added a reverted change: %3$s.',
+          '%s added reverted changes: %3$s.',
         ),
       ),
 
-      '%s removed %s reverted commit(s): %s.' => array(
+      '%s removed %s reverted change(s): %s.' => array(
         array(
-          '%s removed a reverted commit: %3$s.',
-          '%s removed reverted commits: %3$s.',
+          '%s removed a reverted change: %3$s.',
+          '%s removed reverted changes: %3$s.',
         ),
       ),
 
-      '%s edited reverted commit(s), added %s: %s; removed %s: %s.' =>
-        '%s edited reverted commits, added %3$s; removed %5$s.',
+      '%s edited reverted change(s), added %s: %s; removed %s: %s.' =>
+        '%s edited reverted changes, added %3$s; removed %5$s.',
 
-      '%s added %s reverted commit(s) for %s: %s.' => array(
+      '%s added %s reverted change(s) for %s: %s.' => array(
         array(
-          '%s added a reverted commit for %3$s: %4$s.',
-          '%s added reverted commits for %3$s: %4$s.',
+          '%s added a reverted change for %3$s: %4$s.',
+          '%s added reverted changes for %3$s: %4$s.',
         ),
       ),
 
-      '%s removed %s reverted commit(s) for %s: %s.' => array(
+      '%s removed %s reverted change(s) for %s: %s.' => array(
         array(
-          '%s removed a reverted commit for %3$s: %4$s.',
-          '%s removed reverted commits for %3$s: %4$s.',
+          '%s removed a reverted change for %3$s: %4$s.',
+          '%s removed reverted changes for %3$s: %4$s.',
         ),
       ),
 
-      '%s edited reverted commit(s) for %s, added %s: %s; removed %s: %s.' =>
-        '%s edited reverted commits for %2$s, added %4$s; removed %6$s.',
+      '%s edited reverted change(s) for %s, added %s: %s; removed %s: %s.' =>
+        '%s edited reverted changes for %2$s, added %4$s; removed %6$s.',
 
-      '%s added %s reverting commit(s): %s.' => array(
+      '%s added %s reverting change(s): %s.' => array(
         array(
-          '%s added a reverting commit: %3$s.',
-          '%s added reverting commits: %3$s.',
+          '%s added a reverting change: %3$s.',
+          '%s added reverting changes: %3$s.',
         ),
       ),
 
-      '%s removed %s reverting commit(s): %s.' => array(
+      '%s removed %s reverting change(s): %s.' => array(
         array(
-          '%s removed a reverting commit: %3$s.',
-          '%s removed reverting commits: %3$s.',
+          '%s removed a reverting change: %3$s.',
+          '%s removed reverting changes: %3$s.',
         ),
       ),
 
-      '%s edited reverting commit(s), added %s: %s; removed %s: %s.' =>
-        '%s edited reverting commits, added %3$s; removed %5$s.',
+      '%s edited reverting change(s), added %s: %s; removed %s: %s.' =>
+        '%s edited reverting changes, added %3$s; removed %5$s.',
 
-      '%s added %s reverting commit(s) for %s: %s.' => array(
+      '%s added %s reverting change(s) for %s: %s.' => array(
         array(
-          '%s added a reverting commit for %3$s: %4$s.',
-          '%s added reverting commitsi for %3$s: %4$s.',
+          '%s added a reverting change for %3$s: %4$s.',
+          '%s added reverting changes for %3$s: %4$s.',
         ),
       ),
 
-      '%s removed %s reverting commit(s) for %s: %s.' => array(
+      '%s removed %s reverting change(s) for %s: %s.' => array(
         array(
-          '%s removed a reverting commit for %3$s: %4$s.',
-          '%s removed reverting commits for %3$s: %4$s.',
+          '%s removed a reverting change for %3$s: %4$s.',
+          '%s removed reverting changes for %3$s: %4$s.',
         ),
       ),
 
-      '%s edited reverting commit(s) for %s, added %s: %s; removed %s: %s.' =>
-        '%s edited reverting commits for %s, added %4$s; removed %6$s.',
+      '%s edited reverting change(s) for %s, added %s: %s; removed %s: %s.' =>
+        '%s edited reverting changes for %s, added %4$s; removed %6$s.',
 
       '%s changed project member(s), added %d: %s; removed %d: %s.' =>
         '%s changed project members, added %3$s; removed %5$s.',
@@ -1063,29 +1069,54 @@ final class PhabricatorUSEnglishTranslation
         ),
       ),
 
-      'Show First %d Line(s)' => array(
+      'Show First %s Line(s)' => array(
         'Show First Line',
-        'Show First %d Lines',
+        'Show First %s Lines',
       ),
 
-      "\xE2\x96\xB2 Show %d Line(s)" => array(
+      'Show First %s Block(s)' => array(
+        'Show First Block',
+        'Show First %s Blocks',
+      ),
+
+      "\xE2\x96\xB2 Show %s Line(s)" => array(
         "\xE2\x96\xB2 Show Line",
-        "\xE2\x96\xB2 Show %d Lines",
+        "\xE2\x96\xB2 Show %s Lines",
       ),
 
-      'Show All %d Line(s)' => array(
+      "\xE2\x96\xB2 Show %s Block(s)" => array(
+        "\xE2\x96\xB2 Show Block",
+        "\xE2\x96\xB2 Show %s Blocks",
+      ),
+
+      'Show All %s Line(s)' => array(
         'Show Line',
-        'Show All %d Lines',
+        'Show All %s Lines',
       ),
 
-      "\xE2\x96\xBC Show %d Line(s)" => array(
+      'Show All %s Block(s)' => array(
+        'Show Block',
+        'Show All %s Blocks',
+      ),
+
+      "\xE2\x96\xBC Show %s Line(s)" => array(
         "\xE2\x96\xBC Show Line",
-        "\xE2\x96\xBC Show %d Lines",
+        "\xE2\x96\xBC Show %s Lines",
       ),
 
-      'Show Last %d Line(s)' => array(
+      "\xE2\x96\xBC Show %s Block(s)" => array(
+        "\xE2\x96\xBC Show Block",
+        "\xE2\x96\xBC Show %s Blocks",
+      ),
+
+      'Show Last %s Line(s)' => array(
         'Show Last Line',
-        'Show Last %d Lines',
+        'Show Last %s Lines',
+      ),
+
+      'Show Last %s Block(s)' => array(
+        'Show Last Block',
+        'Show Last %s Blocks',
       ),
 
       '%s marked %s inline comment(s) as done and %s inline comment(s) as '.
@@ -1564,7 +1595,7 @@ final class PhabricatorUSEnglishTranslation
       '%s uninvited %s attendee(s): %s.' =>
         '%s uninvited: %3$s.',
 
-      '%s invited %s attendee(s): %s; uninvinted %s attendee(s): %s.' =>
+      '%s invited %s attendee(s): %s; uninvited %s attendee(s): %s.' =>
         '%s invited: %3$s; uninvited: %5$s.',
 
       '%s invited %s attendee(s) to %s: %s.' =>
@@ -1573,7 +1604,7 @@ final class PhabricatorUSEnglishTranslation
       '%s uninvited %s attendee(s) to %s: %s.' =>
         '%s removed invites for %3$s: %4$s.',
 
-      '%s updated the invite list for %s, invited %s: %s; uninvinted %s: %s.' =>
+      '%s updated the invite list for %s, invited %s: %s; uninvited %s: %s.' =>
         '%s updated the invite list for %s, invited: %4$s; uninvited: %6$s.',
 
       'Restart %s build(s)?' => array(
@@ -1636,6 +1667,146 @@ final class PhabricatorUSEnglishTranslation
         array(
           '%s removed an account manager: %3$s.',
           '%s removed account managers: %3$s.',
+        ),
+      ),
+
+      'You are about to apply a bulk edit which will affect '.
+      '%s object(s).' => array(
+        'You are about to apply a bulk edit to a single object.',
+        'You are about to apply a bulk edit which will affect '.
+        '%s objects.',
+      ),
+
+      'Destroyed %s credential(s) of type "%s".' => array(
+        'Destroyed one credential of type "%2$s".',
+        'Destroyed %s credentials of type "%s".',
+      ),
+
+      '%s notification(s) about objects which no longer exist or which '.
+      'you can no longer see were discarded.' => array(
+        'One notification about an object which no longer exists or which '.
+        'you can no longer see was discarded.',
+        '%s notifications about objects which no longer exist or which '.
+        'you can no longer see were discarded.',
+      ),
+
+      'This draft revision will be sent for review once %s '.
+      'build(s) pass: %s.' => array(
+        'This draft revision will be sent for review once this build '.
+        'passes: %2$s.',
+        'This draft revision will be sent for review once these builds '.
+        'pass: %2$s.',
+      ),
+
+      'This factor recently issued a challenge to a different login '.
+      'session. Wait %s second(s) for the code to cycle, then try '.
+      'again.' => array(
+        'This factor recently issued a challenge to a different login '.
+        'session. Wait %s second for the code to cycle, then try '.
+        'again.',
+        'This factor recently issued a challenge to a different login '.
+        'session. Wait %s seconds for the code to cycle, then try '.
+        'again.',
+      ),
+
+      'This factor recently issued a challenge for a different '.
+      'workflow. Wait %s second(s) for the code to cycle, then try '.
+      'again.' => array(
+        'This factor recently issued a challenge for a different '.
+        'workflow. Wait %s second for the code to cycle, then try '.
+        'again.',
+        'This factor recently issued a challenge for a different '.
+        'workflow. Wait %s seconds for the code to cycle, then try '.
+        'again.',
+      ),
+
+
+      'This factor recently issued a challenge which has expired. '.
+      'A new challenge can not be issued yet. Wait %s second(s) for '.
+      'the code to cycle, then try again.' => array(
+        'This factor recently issued a challenge which has expired. '.
+        'A new challenge can not be issued yet. Wait %s second for '.
+        'the code to cycle, then try again.',
+        'This factor recently issued a challenge which has expired. '.
+        'A new challenge can not be issued yet. Wait %s seconds for '.
+        'the code to cycle, then try again.',
+      ),
+
+      'You recently provided a response to this factor. Responses '.
+      'may not be reused. Wait %s second(s) for the code to cycle, '.
+      'then try again.' => array(
+        'You recently provided a response to this factor. Responses '.
+        'may not be reused. Wait %s second for the code to cycle, '.
+        'then try again.',
+        'You recently provided a response to this factor. Responses '.
+        'may not be reused. Wait %s seconds for the code to cycle, '.
+        'then try again.',
+      ),
+
+      'View All %d Subscriber(s)' => array(
+        'View Subscriber',
+        'View All %d Subscribers',
+      ),
+
+      'You are currently editing %s inline comment(s) on this '.
+      'revision.' => array(
+        'You are currently editing an inline comment on this revision.',
+        'You are currently editing %s inline comments on this revision.',
+      ),
+
+      'These %s inline comment(s) will be saved and published.' => array(
+        'This inline comment will be saved and published.',
+        'These inline comments will be saved and published.',
+      ),
+
+      'Delayed %s task(s).' => array(
+        'Delayed 1 task.',
+        'Delayed %s tasks.',
+      ),
+
+      'Freed %s task lease(s).' => array(
+        'Freed 1 task lease.',
+        'Freed %s task leases.',
+      ),
+
+      'Cancelled %s task(s).' => array(
+        'Cancelled 1 task.',
+        'Cancelled %s tasks.',
+      ),
+
+      'Queued %s task(s) for retry.' => array(
+        'Queued 1 task for retry.',
+        'Queued %s tasks for retry.',
+      ),
+
+      'Reprioritized %s task(s).' => array(
+        'Reprioritized one task.',
+        'Reprioritized %s tasks.',
+      ),
+
+      'Executed %s task(s).' => array(
+        'Executed 1 task.',
+        'Executed %s tasks.',
+      ),
+
+      '%s modified %s attached file(s): %s.' => array(
+        array(
+          '%s modified an attached file: %3$s.',
+          '%s modified attached files: %3$s.',
+        ),
+      ),
+
+      '%s attached %s referenced file(s): %s.' => array(
+        array(
+          '%s attached a referenced file: %3$s.',
+          '%s attached referenced files: %3$s.',
+        ),
+      ),
+
+      '%s removed %s attached file(s): %s.' => array(
+        array(
+          '%s removed an attached file: %3$s.',
+          '%s removed attached files: %3$s.',
         ),
       ),
 

@@ -196,19 +196,22 @@ final class PhabricatorRepositoryURI
 
     $map = array(
       PhabricatorRepositoryType::REPOSITORY_TYPE_GIT =>
-        PhabricatorRepositoryURINormalizer::TYPE_GIT,
+        ArcanistRepositoryURINormalizer::TYPE_GIT,
       PhabricatorRepositoryType::REPOSITORY_TYPE_SVN =>
-        PhabricatorRepositoryURINormalizer::TYPE_SVN,
+        ArcanistRepositoryURINormalizer::TYPE_SVN,
       PhabricatorRepositoryType::REPOSITORY_TYPE_MERCURIAL =>
-        PhabricatorRepositoryURINormalizer::TYPE_MERCURIAL,
+        ArcanistRepositoryURINormalizer::TYPE_MERCURIAL,
     );
 
     $type = $map[$vcs];
     $display = (string)$this->getDisplayURI();
 
-    $normal_uri = new PhabricatorRepositoryURINormalizer($type, $display);
+    $normalizer = new ArcanistRepositoryURINormalizer($type, $display);
 
-    return $normal_uri->getNormalizedURI();
+    $domain_map = self::getURINormalizerDomainMap();
+    $normalizer->setDomainMap($domain_map);
+
+    return $normalizer->getNormalizedURI();
   }
 
   public function getDisplayURI() {
@@ -362,7 +365,7 @@ final class PhabricatorRepositoryURI
       return PhabricatorEnv::getEnvConfig('diffusion.ssh-port');
     }
 
-    // If Phabricator is running on a nonstandard port, use that as the defualt
+    // If Phabricator is running on a nonstandard port, use that as the default
     // port for URIs with the same protocol.
 
     $is_http = ($protocol == self::BUILTIN_PROTOCOL_HTTP);
@@ -498,7 +501,7 @@ final class PhabricatorRepositoryURI
         'color' => 'green',
         'label' => pht('Observe'),
         'note' => pht(
-          'Phabricator will observe changes to this URI and copy them.'),
+          'Changes to this URI will be observed and pulled.'),
         'short' => pht('Copy from a remote.'),
       ),
       self::IO_MIRROR => array(
@@ -506,7 +509,7 @@ final class PhabricatorRepositoryURI
         'color' => 'green',
         'label' => pht('Mirror'),
         'note' => pht(
-          'Phabricator will push a copy of any changes to this URI.'),
+          'A copy of any changes will be pushed to this URI.'),
         'short' => pht('Push a copy to a remote.'),
       ),
       self::IO_NONE => array(
@@ -514,7 +517,7 @@ final class PhabricatorRepositoryURI
         'color' => 'grey',
         'label' => pht('No I/O'),
         'note' => pht(
-          'Phabricator will not push or pull any changes to this URI.'),
+          'No changes will be pushed or pulled from this URI.'),
         'short' => pht('Do not perform any I/O.'),
       ),
       self::IO_READ => array(
@@ -522,8 +525,7 @@ final class PhabricatorRepositoryURI
         'color' => 'blue',
         'label' => pht('Read Only'),
         'note' => pht(
-          'Phabricator will serve a read-only copy of the repository from '.
-          'this URI.'),
+          'A read-only copy of the repository will be served from this URI.'),
         'short' => pht('Serve repository in read-only mode.'),
       ),
       self::IO_READWRITE => array(
@@ -531,8 +533,7 @@ final class PhabricatorRepositoryURI
         'color' => 'blue',
         'label' => pht('Read/Write'),
         'note' => pht(
-          'Phabricator will serve a read/write copy of the repository from '.
-          'this URI.'),
+          'A read/write copy of the repository will be served from this URI.'),
         'short' => pht('Serve repository in read/write mode.'),
       ),
     );
@@ -605,18 +606,8 @@ final class PhabricatorRepositoryURI
     return new DiffusionURIEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new PhabricatorRepositoryURITransaction();
-  }
-
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-    return $timeline;
   }
 
 
@@ -743,6 +734,29 @@ final class PhabricatorRepositoryURI
 
   public function getConduitSearchAttachments() {
     return array();
+  }
+
+  public static function getURINormalizerDomainMap() {
+    $domain_map = array();
+
+    // See T13435. If the domain for a repository URI is same as the install
+    // base URI, store it as a "<base-uri>" token instead of the actual domain
+    // so that the index does not fall out of date if the install moves.
+
+    $base_uri = PhabricatorEnv::getURI('/');
+    $base_uri = new PhutilURI($base_uri);
+    $base_domain = $base_uri->getDomain();
+    $domain_map['<base-uri>'] = $base_domain;
+
+    // Likewise, store a token for the "SSH Host" domain so it can be changed
+    // without requiring an index rebuild.
+
+    $ssh_host = PhabricatorEnv::getEnvConfig('diffusion.ssh-host');
+    if (strlen($ssh_host)) {
+      $domain_map['<ssh-host>'] = $ssh_host;
+    }
+
+    return $domain_map;
   }
 
 }

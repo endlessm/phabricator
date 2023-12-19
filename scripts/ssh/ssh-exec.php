@@ -4,9 +4,20 @@
 $ssh_start_time = microtime(true);
 
 $root = dirname(dirname(dirname(__FILE__)));
-require_once $root.'/scripts/__init_script__.php';
+require_once $root.'/scripts/init/init-script.php';
+
+$error_log = id(new PhutilErrorLog())
+  ->setLogName(pht('SSH Error Log'))
+  ->setLogPath(PhabricatorEnv::getEnvConfig('log.ssh-error.path'))
+  ->activateLog();
 
 $ssh_log = PhabricatorSSHLog::getLog();
+
+$request_identifier = Filesystem::readRandomCharacters(12);
+$ssh_log->setData(
+  array(
+    'Q' => $request_identifier,
+  ));
 
 $args = new PhutilArgumentParser($argv);
 $args->setTagline(pht('execute SSH requests'));
@@ -119,9 +130,9 @@ try {
     if (!PhabricatorEnv::isClusterAddress($remote_address)) {
       throw new Exception(
         pht(
-          'This request originates from outside of the Phabricator cluster '.
-          'address range. Requests signed with a trusted device key must '.
-          'originate from trusted hosts.'));
+          'This request originates from outside of the cluster address range. '.
+          'Requests signed with a trusted device key must originate from '.
+          'trusted hosts.'));
     }
 
     $device = id(new AlmanacDeviceQuery())
@@ -133,6 +144,14 @@ try {
         pht(
           'Invalid device name ("%s"). There is no device with this name.',
           $device_name));
+    }
+
+    if ($device->isDisabled()) {
+      throw new Exception(
+        pht(
+          'This request has authenticated as a device ("%s"), but this '.
+          'device is disabled.',
+          $device->getName()));
     }
 
     // We're authenticated as a device, but we're going to read the user out of
@@ -205,21 +224,31 @@ try {
     ->setUniqueMethod('getName')
     ->execute();
 
+  $command_list = array_keys($workflows);
+  $command_list = implode(', ', $command_list);
+
+  $error_lines = array();
+  $error_lines[] = pht(
+    'Welcome to %s.',
+    PlatformSymbols::getPlatformServerName());
+  $error_lines[] = pht(
+    'You are logged in as %s.',
+    $user_name);
+
   if (!$original_argv) {
-    throw new Exception(
-      pht(
-        "Welcome to Phabricator.\n\n".
-        "You are logged in as %s.\n\n".
-        "You haven't specified a command to run. This means you're requesting ".
-        "an interactive shell, but Phabricator does not provide an ".
-        "interactive shell over SSH.\n\n".
-        "Usually, you should run a command like `%s` or `%s` ".
-        "rather than connecting directly with SSH.\n\n".
-        "Supported commands are: %s.",
-        $user_name,
-        'git clone',
-        'hg push',
-        implode(', ', array_keys($workflows))));
+    $error_lines[] = pht(
+      'You have not specified a command to run. This means you are requesting '.
+      'an interactive shell, but this server does not provide interactive '.
+      'shells over SSH.');
+    $error_lines[] = pht(
+      '(Usually, you should run a command like "git clone" or "hg push" '.
+      'instead of connecting directly with SSH.)');
+    $error_lines[] = pht(
+      'Supported commands are: %s.',
+      $command_list);
+
+    $error_lines = implode("\n\n", $error_lines);
+    throw new PhutilArgumentUsageException($error_lines);
   }
 
   $log_argv = implode(' ', $original_argv);
@@ -241,13 +270,27 @@ try {
   $parsed_args = new PhutilArgumentParser($parseable_argv);
 
   if (empty($workflows[$command])) {
-    throw new Exception(pht('Invalid command.'));
+    $error_lines[] = pht(
+      'You have specified the command "%s", but that command is not '.
+      'supported by this server. As received by this server, your entire '.
+      'argument list was:',
+      $command);
+
+    $error_lines[] = csprintf('  $ ssh ... -- %Ls', $parseable_argv);
+
+    $error_lines[] = pht(
+      'Supported commands are: %s.',
+      $command_list);
+
+    $error_lines = implode("\n\n", $error_lines);
+    throw new PhutilArgumentUsageException($error_lines);
   }
 
   $workflow = $parsed_args->parseWorkflows($workflows);
-  $workflow->setUser($user);
+  $workflow->setSSHUser($user);
   $workflow->setOriginalArguments($original_argv);
   $workflow->setIsClusterRequest($is_cluster_request);
+  $workflow->setRequestIdentifier($request_identifier);
 
   $sock_stdin = fopen('php://stdin', 'r');
   if (!$sock_stdin) {
@@ -300,7 +343,7 @@ try {
 $ssh_log->setData(
   array(
     'c' => $err,
-    'T' => (int)(1000000 * (microtime(true) - $ssh_start_time)),
+    'T' => phutil_microseconds_since($ssh_start_time),
   ));
 
 exit($err);

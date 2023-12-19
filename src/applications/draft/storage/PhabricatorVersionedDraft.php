@@ -35,6 +35,23 @@ final class PhabricatorVersionedDraft extends PhabricatorDraftDAO {
     return idx($this->properties, $key, $default);
   }
 
+  public static function loadDrafts(
+    array $object_phids,
+    $viewer_phid) {
+
+    $rows = id(new self())->loadAllWhere(
+      'objectPHID IN (%Ls) AND authorPHID = %s ORDER BY version ASC',
+      $object_phids,
+      $viewer_phid);
+
+    $map = array();
+    foreach ($rows as $row) {
+      $map[$row->getObjectPHID()] = $row;
+    }
+
+    return $map;
+  }
+
   public static function loadDraft(
     $object_phid,
     $viewer_phid) {
@@ -80,20 +97,17 @@ final class PhabricatorVersionedDraft extends PhabricatorDraftDAO {
 
   public static function purgeDrafts(
     $object_phid,
-    $viewer_phid,
-    $version) {
+    $viewer_phid) {
 
     $draft = new PhabricatorVersionedDraft();
     $conn_w = $draft->establishConnection('w');
 
     queryfx(
       $conn_w,
-      'DELETE FROM %T WHERE objectPHID = %s AND authorPHID = %s
-        AND version <= %d',
+      'DELETE FROM %T WHERE objectPHID = %s AND authorPHID = %s',
       $draft->getTableName(),
       $object_phid,
-      $viewer_phid,
-      $version);
+      $viewer_phid);
   }
 
 }

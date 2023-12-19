@@ -12,11 +12,14 @@ JX.install('PHUIXActionView', {
     _node: null,
     _name: null,
     _icon: 'none',
+    _iconColor: null,
     _disabled: false,
     _label: false,
     _handler: null,
     _selected: false,
     _divider: false,
+    _keyCommand: null,
+    _unresponsive: null,
 
     _iconNode: null,
     _nameNode: null,
@@ -31,6 +34,16 @@ JX.install('PHUIXActionView', {
       this._buildIconNode(true);
 
       return this;
+    },
+
+    setUnresponsive: function(unresponsive) {
+      this._unresponsive = unresponsive;
+      this._buildNameNode(true);
+      return this;
+    },
+
+    getDisabled: function() {
+      return this._disabled;
     },
 
     setLabel: function(label) {
@@ -70,6 +83,7 @@ JX.install('PHUIXActionView', {
     setHandler: function(handler) {
       this._handler = handler;
       this._buildNameNode(true);
+      this._rebuildClasses();
       return this;
     },
 
@@ -79,9 +93,28 @@ JX.install('PHUIXActionView', {
       return this;
     },
 
+    setIconColor: function(color) {
+      this._iconColor = color;
+      this._buildIconNode(true);
+      return this;
+    },
+
     setHref: function(href) {
       this._href = href;
       this._buildNameNode(true);
+      this._rebuildClasses();
+      return this;
+    },
+
+    setKeyCommand: function(command) {
+      this._keyCommand = command;
+
+      var key_node = this._buildKeyCommandNode();
+      JX.DOM.setContent(key_node, this._keyCommand);
+
+      var node = this.getNode();
+      JX.DOM.alterClass(node, 'has-key-command', !!this._keyCommand);
+
       return this;
     },
 
@@ -89,17 +122,14 @@ JX.install('PHUIXActionView', {
       if (!this._node) {
         var classes = ['phabricator-action-view'];
 
-        if (this._href || this._handler) {
-          classes.push('phabricator-action-view-href');
-        }
-
         if (this._icon) {
           classes.push('action-has-icon');
         }
 
         var content = [
           this._buildIconNode(),
-          this._buildNameNode()
+          this._buildNameNode(),
+          this._buildKeyCommandNode(),
         ];
 
         var attr = {
@@ -108,9 +138,18 @@ JX.install('PHUIXActionView', {
         this._node = JX.$N('li', attr, content);
 
         JX.Stratcom.addSigil(this._node, 'phuix-action-view');
+
+        this._rebuildClasses();
       }
 
       return this._node;
+    },
+
+    _rebuildClasses: function() {
+      var node = this.getNode();
+
+      var is_href = !!(this._href || this._handler);
+      JX.DOM.alterClass(node, 'phabricator-action-view-href', is_href);
     },
 
     _buildIconNode: function(dirty) {
@@ -129,6 +168,10 @@ JX.install('PHUIXActionView', {
           icon_class = icon_class + ' grey';
         }
 
+        if (this._iconColor) {
+          icon_class = icon_class + ' ' + this._iconColor;
+        }
+
         JX.DOM.alterClass(node, icon_class, true);
 
         if (this._iconNode && this._iconNode.parentNode) {
@@ -140,6 +183,17 @@ JX.install('PHUIXActionView', {
       return this._iconNode;
     },
 
+    _buildKeyCommandNode: function() {
+      if (!this._keyCommandNode) {
+        var attrs = {
+          className: 'keyboard-shortcut-key'
+        };
+
+        this._keyCommandNode = JX.$N('div', attrs);
+      }
+      return this._keyCommandNode;
+    },
+
     _buildNameNode: function(dirty) {
       if (!this._nameNode || dirty) {
         var attr = {
@@ -147,12 +201,11 @@ JX.install('PHUIXActionView', {
         };
 
         var href = this._href;
-        if (!href && this._handler) {
+        if (!href && this._handler && !this._unresponsive) {
           href = '#';
         }
         if (href) {
           attr.href = href;
-
         }
 
         var tag = href ? 'a' : 'span';
@@ -170,6 +223,11 @@ JX.install('PHUIXActionView', {
     },
 
     _onclick: function(e) {
+      if (this._unresponsive) {
+        e.prevent();
+        return;
+      }
+
       if (this._handler) {
         this._handler(e);
       }

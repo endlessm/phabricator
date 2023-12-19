@@ -82,7 +82,7 @@ final class PhabricatorHandleList
       if (!isset($this[$phid])) {
         throw new Exception(
           pht(
-            'Trying to create a new sublist of an existsing handle list, '.
+            'Trying to create a new sublist of an existing handle list, '.
             'but PHID "%s" does not appear in the parent list.',
             $phid));
       }
@@ -104,6 +104,10 @@ final class PhabricatorHandleList
       ->setHandleList($this);
   }
 
+  public function newListView() {
+    return id(new FuelHandleListView())
+      ->addHandleList($this);
+  }
 
   /**
    * Return a @{class:PHUIHandleView} which can render a specific handle.
@@ -122,22 +126,27 @@ final class PhabricatorHandleList
 /* -(  Iterator  )----------------------------------------------------------- */
 
 
+  #[\ReturnTypeWillChange]
   public function rewind() {
     $this->cursor = 0;
   }
 
+  #[\ReturnTypeWillChange]
   public function current() {
     return $this->getHandle($this->phids[$this->cursor]);
   }
 
+  #[\ReturnTypeWillChange]
   public function key() {
     return $this->phids[$this->cursor];
   }
 
+  #[\ReturnTypeWillChange]
   public function next() {
     ++$this->cursor;
   }
 
+  #[\ReturnTypeWillChange]
   public function valid() {
     return ($this->cursor < $this->count);
   }
@@ -146,6 +155,7 @@ final class PhabricatorHandleList
 /* -(  ArrayAccess  )-------------------------------------------------------- */
 
 
+  #[\ReturnTypeWillChange]
   public function offsetExists($offset) {
     // NOTE: We're intentionally not loading handles here so that isset()
     // checks do not trigger fetches. This gives us better bulk loading
@@ -158,6 +168,7 @@ final class PhabricatorHandleList
     return isset($this->map[$offset]);
   }
 
+  #[\ReturnTypeWillChange]
   public function offsetGet($offset) {
     if ($this->handles === null) {
       $this->loadHandles();
@@ -165,10 +176,12 @@ final class PhabricatorHandleList
     return $this->handles[$offset];
   }
 
+  #[\ReturnTypeWillChange]
   public function offsetSet($offset, $value) {
     $this->raiseImmutableException();
   }
 
+  #[\ReturnTypeWillChange]
   public function offsetUnset($offset) {
     $this->raiseImmutableException();
   }
@@ -185,6 +198,7 @@ final class PhabricatorHandleList
 /* -(  Countable  )---------------------------------------------------------- */
 
 
+  #[\ReturnTypeWillChange]
   public function count() {
     return $this->count;
   }

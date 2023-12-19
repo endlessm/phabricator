@@ -44,16 +44,30 @@ JX.behavior('diffusion-commit-graph', function(config) {
     cxt.stroke();
   }
 
+  // If the graph is going to be wide, squish it a bit so it doesn't take up
+  // quite as much space.
+  var default_width;
+  if (config.count >= 8) {
+    default_width = 6;
+  } else {
+    default_width = 12;
+  }
 
   for (var ii = 0; ii < nodes.length; ii++) {
     var data = JX.Stratcom.getData(nodes[ii]);
 
-    var cell = 12; // Width of each thread.
+    var cell = default_width;
     var xpos = function(col) {
       return (col * cell) + (cell / 2);
     };
 
-    var h = 34;
+    var h;
+    if (config.height) {
+      h = config.height;
+    } else {
+      h = JX.Vector.getDim(nodes[ii].parentNode).y;
+    }
+
     var w = cell * config.count;
 
     var canvas = JX.$N('canvas', {width: w, height: h});
@@ -139,7 +153,7 @@ JX.behavior('diffusion-commit-graph', function(config) {
       }
     }
 
-    JX.DOM.setContent(nodes[ii], canvas);
+    JX.DOM.replace(nodes[ii], canvas);
   }
 
 

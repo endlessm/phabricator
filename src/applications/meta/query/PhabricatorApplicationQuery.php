@@ -89,7 +89,7 @@ final class PhabricatorApplicationQuery
       }
     }
 
-    if (strlen($this->nameContains)) {
+    if ($this->nameContains !== null) {
       foreach ($apps as $key => $app) {
         if (stripos($app->getName(), $this->nameContains) === false) {
           unset($apps[$key]);
@@ -167,12 +167,6 @@ final class PhabricatorApplicationQuery
     // to filter its results just leaves us recursing indefinitely. Users
     // always have access to applications regardless of other policy settings
     // anyway.
-    return null;
-  }
-
-  protected function getResultCursor($object) {
-    // TODO: This won't work, but doesn't matter until we write more than 100
-    // applications. Since we only have about 70, just avoid fataling for now.
     return null;
   }
 

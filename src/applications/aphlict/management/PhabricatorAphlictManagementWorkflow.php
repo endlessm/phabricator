@@ -217,6 +217,7 @@ abstract class PhabricatorAphlictManagementWorkflow
             'index "%s"). You should manually create this directory or '.
             'choose a different logfile location. %s',
             $dir,
+            $index,
             $ex->getMessage()));
       }
     }
@@ -549,11 +550,18 @@ abstract class PhabricatorAphlictManagementWorkflow
   }
 
   private function getStartCommand(array $server_argv) {
+    $launch_argv = array();
+
+    if ($this->debug) {
+      $launch_argv[] = '--debug=1';
+    }
+
     return csprintf(
-      '%R %Ls -- %s %Ls',
+      '%R %Ls -- %s %Ls %Ls',
       $this->getNodeBinary(),
       $this->getNodeArgv(),
       $this->getAphlictScriptPath(),
+      $launch_argv,
       $server_argv);
   }
 

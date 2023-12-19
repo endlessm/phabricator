@@ -10,6 +10,10 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
     return false;
   }
 
+  public function shouldAllowPartialSessions() {
+    return true;
+  }
+
   public function handleRequest(AphrontRequest $request) {
     $viewer = $request->getViewer();
     $this->phid = $request->getURIData('phid');
@@ -21,6 +25,9 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
     $alt_domain = $alt_uri->getDomain();
     $req_domain = $request->getHost();
     $main_domain = id(new PhutilURI($base_uri))->getDomain();
+
+    $request_kind = $request->getURIData('kind');
+    $is_download = ($request_kind === 'download');
 
     if (!strlen($alt) || $main_domain == $alt_domain) {
       // No alternate domain.
@@ -46,7 +53,7 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
     if ($should_redirect) {
       return id(new AphrontRedirectResponse())
         ->setIsExternal(true)
-        ->setURI($file->getCDNURI());
+        ->setURI($file->getCDNURI($request_kind));
     }
 
     $response = new AphrontFileResponse();
@@ -66,35 +73,51 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
       list($begin, $end) = $response->parseHTTPRange($range);
     }
 
-    $is_viewable = $file->isViewableInBrowser();
-    $force_download = $request->getExists('download');
+    if (!$file->isViewableInBrowser()) {
+      $is_download = true;
+    }
 
     $request_type = $request->getHTTPHeader('X-Phabricator-Request-Type');
     $is_lfs = ($request_type == 'git-lfs');
 
-    if ($is_viewable && !$force_download) {
+    if (!$is_download) {
       $response->setMimeType($file->getViewableMimeType());
     } else {
-      $is_public = !$viewer->isLoggedIn();
       $is_post = $request->isHTTPPost();
+      $is_public = !$viewer->isLoggedIn();
 
-      // NOTE: Require POST to download files from the primary domain if the
-      // request includes credentials. The "Download File" links we generate
-      // in the web UI are forms which use POST to satisfy this requirement.
+      // NOTE: Require POST to download files from the primary domain. If the
+      // request is not a POST request but arrives on the primary domain, we
+      // render a confirmation dialog. For discussion, see T13094.
 
-      // The intent is to make attacks based on tags like "<iframe />" and
-      // "<script />" (which can issue GET requests, but can not easily issue
-      // POST requests) more difficult to execute.
+      // There are two exceptions to this rule:
 
-      // The best defense against these attacks is to use an alternate file
-      // domain, which is why we strongly recommend doing so.
+      // Git LFS requests can download with GET. This is safe (Git LFS won't
+      // execute files it downloads) and necessary to support Git LFS.
 
-      $is_safe = ($is_alternate_domain || $is_lfs || $is_post || $is_public);
+      // Requests with no credentials may also download with GET. This
+      // primarily supports downloading files with `arc download` or other
+      // API clients. This is only "mostly" safe: if you aren't logged in, you
+      // are likely immune to XSS and CSRF. However, an attacker may still be
+      // able to set cookies on this domain (for example, to fixate your
+      // session). For now, we accept these risks because users running
+      // Phabricator in this mode are knowingly accepting a security risk
+      // against setup advice, and there's significant value in having
+      // API development against test and production installs work the same
+      // way.
+
+      $is_safe = ($is_alternate_domain || $is_post || $is_lfs || $is_public);
       if (!$is_safe) {
-        // This is marked as "external" because it is fully qualified.
-        return id(new AphrontRedirectResponse())
-          ->setIsExternal(true)
-          ->setURI(PhabricatorEnv::getProductionURI($file->getBestURI()));
+        return $this->newDialog()
+          ->setSubmitURI($file->getDownloadURI())
+          ->setTitle(pht('Download File'))
+          ->appendParagraph(
+            pht(
+              'Download file %s (%s)?',
+              phutil_tag('strong', array(), $file->getName()),
+              phutil_format_bytes($file->getByteSize())))
+          ->addCancelButton($file->getURI())
+          ->addSubmitButton(pht('Download File'));
       }
 
       $response->setMimeType($file->getMimeType());
@@ -105,6 +128,23 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
 
     $response->setContentLength($file->getByteSize());
     $response->setContentIterator($iterator);
+
+    // In Chrome, we must permit this domain in "object-src" CSP when serving a
+    // PDF or the browser will refuse to render it.
+    if (!$is_download && $file->isPDF()) {
+      $request_uri = id(clone $request->getAbsoluteRequestURI())
+        ->setPath(null)
+        ->setFragment(null)
+        ->removeAllQueryParams();
+
+      $response->addContentSecurityPolicyURI(
+        'object-src',
+        (string)$request_uri);
+    }
+
+    if ($this->shouldCompressFileDataResponse($file)) {
+      $response->setCompressResponse(true);
+    }
 
     return $response;
   }
@@ -119,7 +159,7 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
     // make this logic simpler and more consistent.
 
     // Beyond making the policy check itself more consistent, this also makes
-    // sure we're consitent about returning HTTP 404 on bad requests instead
+    // sure we're consistent about returning HTTP 404 on bad requests instead
     // of serving HTTP 200 with a login page, which can mislead some clients.
 
     $viewer = PhabricatorUser::getOmnipotentUser();
@@ -186,6 +226,53 @@ final class PhabricatorFileDataController extends PhabricatorFileController {
       throw new PhutilInvalidStateException('loadFile');
     }
     return $this->file;
+  }
+
+  private function shouldCompressFileDataResponse(PhabricatorFile $file) {
+    // If the client sends "Accept-Encoding: gzip", we have the option of
+    // compressing the response.
+
+    // We generally expect this to be a good idea if the file compresses well,
+    // but maybe not such a great idea if the file is already compressed (like
+    // an image or video) or compresses poorly: the CPU cost of compressing and
+    // decompressing the stream may exceed the bandwidth savings during
+    // transfer.
+
+    // Ideally, we'd probably make this decision by compressing files when
+    // they are uploaded, storing the compressed size, and then doing a test
+    // here using the compression savings and estimated transfer speed.
+
+    // For now, just guess that we shouldn't compress images or videos or
+    // files that look like they are already compressed, and should compress
+    // everything else.
+
+    if ($file->isViewableImage()) {
+      return false;
+    }
+
+    if ($file->isAudio()) {
+      return false;
+    }
+
+    if ($file->isVideo()) {
+      return false;
+    }
+
+    $compressed_types = array(
+      'application/x-gzip',
+      'application/x-compress',
+      'application/x-compressed',
+      'application/x-zip-compressed',
+      'application/zip',
+    );
+    $compressed_types = array_fuse($compressed_types);
+
+    $mime_type = $file->getMimeType();
+    if (isset($compressed_types[$mime_type])) {
+      return false;
+    }
+
+    return true;
   }
 
 }

@@ -11,28 +11,38 @@ final class PhabricatorPHPPreflightSetupCheck extends PhabricatorSetupCheck {
   }
 
   protected function executeChecks() {
-    if (version_compare(phpversion(), 7, '>=') &&
-        version_compare(phpversion(), 7.1, '<')) {
+    $version = phpversion();
+    if (version_compare($version, 7, '>=') &&
+        version_compare($version, 7.1, '<')) {
       $message = pht(
-        'This version of Phabricator does not support PHP 7.0. You '.
-        'are running PHP %s. Upgrade to PHP 7.1 or newer.',
-        phpversion());
+        'You are running PHP version %s. PHP versions between 7.0 and 7.1 '.
+        'are not supported'.
+        "\n\n".
+        'PHP removed reqiured signal handling features in '.
+        'PHP 7.0, and did not restore an equivalent mechanism until PHP 7.1.'.
+        "\n\n".
+        'Upgrade to PHP 7.1 or newer (recommended) or downgrade to an older '.
+        'version of PHP 5 (discouraged).',
+        $version);
 
       $this->newIssue('php.version7')
         ->setIsFatal(true)
-        ->setName(pht('PHP 7.0 Not Supported'))
+        ->setName(pht('PHP 7.0-7.1 Not Supported'))
         ->setMessage($message)
         ->addLink(
           'https://phurl.io/u/php7',
-          pht('Phabricator PHP 7 Compatibility Information'));
+          pht('PHP 7 Compatibility Information'));
 
       return;
     }
 
+    // TODO: This can be removed entirely because the minimum PHP version is
+    // now PHP 5.5, which does not have safe mode.
+
     $safe_mode = ini_get('safe_mode');
     if ($safe_mode) {
       $message = pht(
-        "You have '%s' enabled in your PHP configuration, but Phabricator ".
+        "You have '%s' enabled in your PHP configuration, but this software ".
         "will not run in safe mode. Safe mode has been deprecated in PHP 5.3 ".
         "and removed in PHP 5.4.\n\nDisable safe mode to continue.",
         'safe_mode');
@@ -82,7 +92,7 @@ final class PhabricatorPHPPreflightSetupCheck extends PhabricatorSetupCheck {
         if ($fatal) {
           $message = pht(
             "You have '%s' enabled in your PHP configuration.\n\n".
-            "This option is not compatible with Phabricator. Remove ".
+            "This option is not compatible with this software. Remove ".
             "'%s' from your configuration to continue.",
             $disable_option,
             $disable_option);
@@ -101,7 +111,7 @@ final class PhabricatorPHPPreflightSetupCheck extends PhabricatorSetupCheck {
     if ($func_overload) {
       $message = pht(
         "You have '%s' enabled in your PHP configuration.\n\n".
-        "This option is not compatible with Phabricator. Disable ".
+        "This option is not compatible with this software. Disable ".
         "'%s' in your PHP configuration to continue.",
         $overload_option,
         $overload_option);
@@ -124,7 +134,7 @@ final class PhabricatorPHPPreflightSetupCheck extends PhabricatorSetupCheck {
       // rare (particularly in supported environments).
 
       $message = pht(
-        "Your server is configured with '%s', which prevents Phabricator ".
+        "Your server is configured with '%s', which prevents this software ".
         "from opening files it requires access to.\n\n".
         "Disable this setting to continue.",
         'open_basedir');

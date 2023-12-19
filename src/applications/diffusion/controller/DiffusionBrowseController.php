@@ -4,7 +4,6 @@ final class DiffusionBrowseController extends DiffusionController {
 
   private $lintCommit;
   private $lintMessages;
-  private $coverage;
   private $corpusButtons = array();
 
   public function shouldAllowPublic() {
@@ -45,13 +44,13 @@ final class DiffusionBrowseController extends DiffusionController {
 
     if ($is_file) {
       return $this->browseFile();
-    } else {
-      $paths = $results->getPaths();
-      $paths = $pager->sliceResults($paths);
-      $results->setPaths($paths);
-
-      return $this->browseDirectory($results, $pager);
     }
+
+    $paths = $results->getPaths();
+    $paths = $pager->sliceResults($paths);
+    $results->setPaths($paths);
+
+    return $this->browseDirectory($results, $pager);
   }
 
   private function browseSearch() {
@@ -110,41 +109,12 @@ final class DiffusionBrowseController extends DiffusionController {
     }
 
     $path = $drequest->getPath();
-
-    $blame_key = PhabricatorDiffusionBlameSetting::SETTINGKEY;
-    $show_blame = $request->getBool(
-      'blame',
-      $viewer->getUserSetting($blame_key));
-
-    $view = $request->getStr('view');
-    if ($request->isFormPost() && $view != 'raw' && $viewer->isLoggedIn()) {
-      $preferences = PhabricatorUserPreferences::loadUserPreferences($viewer);
-
-      $editor = id(new PhabricatorUserPreferencesEditor())
-        ->setActor($viewer)
-        ->setContentSourceFromRequest($request)
-        ->setContinueOnNoEffect(true)
-        ->setContinueOnMissingFields(true);
-
-      $xactions = array();
-      $xactions[] = $preferences->newTransaction($blame_key, $show_blame);
-      $editor->applyTransactions($preferences, $xactions);
-
-      $uri = $request->getRequestURI()
-        ->alter('blame', null);
-
-      return id(new AphrontRedirectResponse())->setURI($uri);
-    }
-
-    // We need the blame information if blame is on and this is an Ajax request.
-    // If blame is on and this is a colorized request, we don't show blame at
-    // first (we ajax it in afterward) so we don't need to query for it.
-    $needs_blame = ($show_blame && $request->isAjax());
-
     $params = array(
       'commit' => $drequest->getCommit(),
       'path' => $drequest->getPath(),
     );
+
+    $view = $request->getStr('view');
 
     $byte_limit = null;
     if ($view !== 'raw') {
@@ -207,41 +177,26 @@ final class DiffusionBrowseController extends DiffusionController {
           $file->setName($basename);
 
           return $file->getRedirectResponse();
-        } else {
-          $corpus = $this->buildGitLFSCorpus($lfs_ref);
         }
-      } else if (ArcanistDiffUtils::isHeuristicBinaryFile($data)) {
-        $file_uri = $file->getBestURI();
 
-        if ($file->isViewableImage()) {
-          $corpus = $this->buildImageCorpus($file_uri);
-        } else {
-          $corpus = $this->buildBinaryCorpus($file_uri, $data);
-        }
+        $corpus = $this->buildGitLFSCorpus($lfs_ref);
       } else {
-        $this->loadLintMessages();
-        $this->coverage = $drequest->loadCoverage();
         $show_editor = true;
 
-        // Build the content of the file.
-        $corpus = $this->buildCorpus(
-          $show_blame,
-          $data,
-          $needs_blame,
-          $drequest,
-          $path,
-          $data);
+        $ref = id(new PhabricatorDocumentRef())
+          ->setFile($file);
+
+        $engine = id(new DiffusionDocumentRenderingEngine())
+          ->setRequest($request)
+          ->setDiffusionRequest($drequest);
+
+        $corpus = $engine->newDocumentView($ref);
+
+        $this->corpusButtons[] = $this->renderFileButton();
       }
     }
 
-    if ($request->isAjax()) {
-      return id(new AphrontAjaxResponse())->setContent($corpus);
-    }
-
-    require_celerity_resource('diffusion-source-css');
-
-    // Render the page.
-    $bar = $this->buildButtonBar($drequest, $show_blame, $show_editor);
+    $bar = $this->buildButtonBar($drequest, $show_editor);
     $header = $this->buildHeaderView($drequest);
     $header->setHeaderIcon('fa-file-code-o');
 
@@ -337,29 +292,14 @@ final class DiffusionBrowseController extends DiffusionController {
 
     $empty_result = null;
     $browse_panel = null;
-    $branch_panel = null;
     if (!$results->isValidResults()) {
       $empty_result = new DiffusionEmptyResultView();
       $empty_result->setDiffusionRequest($drequest);
       $empty_result->setDiffusionBrowseResultSet($results);
       $empty_result->setView($request->getStr('view'));
     } else {
-      $phids = array();
-      foreach ($results->getPaths() as $result) {
-        $data = $result->getLastCommitData();
-        if ($data) {
-          if ($data->getCommitDetail('authorPHID')) {
-            $phids[$data->getCommitDetail('authorPHID')] = true;
-          }
-        }
-      }
-
-      $phids = array_keys($phids);
-      $handles = $this->loadViewerHandles($phids);
-
       $browse_table = id(new DiffusionBrowseTableView())
         ->setDiffusionRequest($drequest)
-        ->setHandles($handles)
         ->setPaths($results->getPaths())
         ->setUser($request->getUser());
 
@@ -373,12 +313,6 @@ final class DiffusionBrowseController extends DiffusionController {
         ->setTable($browse_table)
         ->addClass('diffusion-mobile-view')
         ->setPager($pager);
-
-      $path = $drequest->getPath();
-      $is_branch = (!strlen($path) && $repository->supportsBranchComparison());
-      if ($is_branch) {
-        $branch_panel = $this->buildBranchTable();
-      }
     }
 
     $open_revisions = $this->buildOpenRevisions();
@@ -404,7 +338,6 @@ final class DiffusionBrowseController extends DiffusionController {
       ->setFooter(
         array(
           $bar,
-          $branch_panel,
           $empty_result,
           $browse_panel,
           $open_revisions,
@@ -510,203 +443,28 @@ final class DiffusionBrowseController extends DiffusionController {
     return $view;
   }
 
-  private function loadLintMessages() {
-    $drequest = $this->getDiffusionRequest();
-    $branch = $drequest->loadBranch();
-
-    if (!$branch || !$branch->getLintCommit()) {
-      return;
-    }
-
-    $this->lintCommit = $branch->getLintCommit();
-
-    $conn = id(new PhabricatorRepository())->establishConnection('r');
-
-    $where = '';
-    if ($drequest->getLint()) {
-      $where = qsprintf(
-        $conn,
-        'AND code = %s',
-        $drequest->getLint());
-    }
-
-    $this->lintMessages = queryfx_all(
-      $conn,
-      'SELECT * FROM %T WHERE branchID = %d %Q AND path = %s',
-      PhabricatorRepository::TABLE_LINTMESSAGE,
-      $branch->getID(),
-      $where,
-      '/'.$drequest->getPath());
-  }
-
-  private function buildCorpus(
-    $show_blame,
-    $file_corpus,
-    $needs_blame,
-    DiffusionRequest $drequest,
-    $path,
-    $data) {
-
-    $viewer = $this->getViewer();
-    $blame_timeout = 15;
-    $blame_failed = false;
-
-    $highlight_limit = DifferentialChangesetParser::HIGHLIGHT_BYTE_LIMIT;
-    $blame_limit = DifferentialChangesetParser::HIGHLIGHT_BYTE_LIMIT;
-    $can_highlight = (strlen($file_corpus) <= $highlight_limit);
-    $can_blame = (strlen($file_corpus) <= $blame_limit);
-
-    if ($needs_blame && $can_blame) {
-      $blame = $this->loadBlame($path, $drequest->getCommit(), $blame_timeout);
-      list($blame_list, $blame_commits) = $blame;
-      if ($blame_list === null) {
-        $blame_failed = true;
-        $blame_list = array();
-      }
-    } else {
-      $blame_list = array();
-      $blame_commits = array();
-    }
-
-    require_celerity_resource('syntax-highlighting-css');
-    if ($can_highlight) {
-      $highlighted = PhabricatorSyntaxHighlighter::highlightWithFilename(
-        $path,
-        $file_corpus);
-    } else {
-      // Highlight as plain text to escape the content properly.
-      $highlighted = PhabricatorSyntaxHighlighter::highlightWithLanguage(
-        'txt',
-        $file_corpus);
-    }
-
-    $lines = phutil_split_lines($highlighted);
-
-    $rows = $this->buildDisplayRows(
-      $lines,
-      $blame_list,
-      $blame_commits,
-      $show_blame);
-
-    $corpus_table = javelin_tag(
-      'table',
-      array(
-        'class' => 'diffusion-source remarkup-code PhabricatorMonospaced',
-        'sigil' => 'phabricator-source',
-      ),
-      $rows);
-
-    $corpus_table = phutil_tag_div('diffusion-source-wrap', $corpus_table);
-
-    if ($this->getRequest()->isAjax()) {
-      return $corpus_table;
-    }
-
-    $id = celerity_generate_unique_node_id();
-
-    $repo = $drequest->getRepository();
-    $symbol_repos = nonempty($repo->getSymbolSources(), array());
-    $symbol_repos[] = $repo->getPHID();
-
-    $lang = last(explode('.', $drequest->getPath()));
-    $repo_languages = $repo->getSymbolLanguages();
-    $repo_languages = nonempty($repo_languages, array());
-    $repo_languages = array_fill_keys($repo_languages, true);
-
-    $needs_symbols = true;
-    if ($repo_languages && $symbol_repos) {
-      $have_symbols = id(new DiffusionSymbolQuery())
-          ->existsSymbolsInRepository($repo->getPHID());
-      if (!$have_symbols) {
-        $needs_symbols = false;
-      }
-    }
-
-    if ($needs_symbols && $repo_languages) {
-      $needs_symbols = isset($repo_languages[$lang]);
-    }
-
-    if ($needs_symbols) {
-      Javelin::initBehavior(
-        'repository-crossreference',
-        array(
-          'container' => $id,
-          'lang' => $lang,
-          'repositories' => $symbol_repos,
-        ));
-    }
-
-    $corpus = phutil_tag(
-      'div',
-      array(
-        'id' => $id,
-      ),
-      $corpus_table);
-
-    Javelin::initBehavior('load-blame', array('id' => $id));
-
-    $this->corpusButtons[] = $this->renderFileButton();
-    $title = basename($this->getDiffusionRequest()->getPath());
-    $icon = 'fa-file-code-o';
-    $drequest = $this->getDiffusionRequest();
-    $this->buildActionButtons($drequest);
-
-    $header = $this->buildPanelHeaderView($title, $icon);
-
-    $corpus = id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($corpus)
-      ->addClass('diffusion-mobile-view')
-      ->setCollapsed(true);
-
-    $messages = array();
-
-    if (!$can_highlight) {
-      $messages[] = pht(
-        'This file is larger than %s, so syntax highlighting is disabled '.
-        'by default.',
-        phutil_format_bytes($highlight_limit));
-    }
-
-    if ($show_blame && !$can_blame) {
-      $messages[] = pht(
-        'This file is larger than %s, so blame is disabled.',
-        phutil_format_bytes($blame_limit));
-    }
-
-    if ($blame_failed) {
-      $messages[] = pht(
-        'Failed to load blame information for this file in %s second(s).',
-        new PhutilNumber($blame_timeout));
-    }
-
-    if ($messages) {
-      $corpus->setInfoView(
-        id(new PHUIInfoView())
-          ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
-          ->setErrors($messages));
-    }
-
-    return $corpus;
-  }
-
   private function buildButtonBar(
     DiffusionRequest $drequest,
-    $show_blame,
     $show_editor) {
 
     $viewer = $this->getViewer();
     $base_uri = $this->getRequest()->getRequestURI();
 
-    $user = $this->getRequest()->getUser();
     $repository = $drequest->getRepository();
     $path = $drequest->getPath();
     $line = nonempty((int)$drequest->getLine(), 1);
     $buttons = array();
 
-    $editor_link = $user->loadEditorLink($path, $line, $repository);
-    $template = $user->loadEditorLink($path, '%l', $repository);
+    $editor_uri = null;
+    $editor_template = null;
+
+    $link_engine = PhabricatorEditorURIEngine::newForViewer($viewer);
+    if ($link_engine) {
+      $link_engine->setRepository($repository);
+
+      $editor_uri = $link_engine->getURIForPath($path, $line);
+      $editor_template = $link_engine->getURITokensForPath($path);
+    }
 
     $buttons[] =
       id(new PHUIButtonView())
@@ -720,75 +478,16 @@ final class DiffusionBrowseController extends DiffusionController {
             )))
         ->setIcon('fa-backward');
 
-    if ($show_blame) {
-      $blame_text = pht('Disable Blame');
-      $blame_icon = 'fa-exclamation-circle lightgreytext';
-      $blame_value = 0;
-    } else {
-      $blame_text = pht('Enable Blame');
-      $blame_icon = 'fa-exclamation-circle';
-      $blame_value = 1;
-    }
-
-    $blame = id(new PHUIButtonView())
-      ->setText($blame_text)
-      ->setIcon($blame_icon)
-      ->setUser($viewer)
-      ->setSelected(!$blame_value)
-      ->setColor(PHUIButtonView::GREY);
-
-    if ($viewer->isLoggedIn()) {
-      $blame = phabricator_form(
-        $viewer,
-        array(
-          'action' => $base_uri->alter('blame', $blame_value),
-          'method' => 'POST',
-          'style' => 'display: inline-block;',
-        ),
-        $blame);
-    } else {
-      $blame->setTag('a');
-      $blame->setHref($base_uri->alter('blame', $blame_value));
-    }
-    $buttons[] = $blame;
-
-    if ($editor_link) {
+    if ($editor_uri) {
       $buttons[] =
         id(new PHUIButtonView())
           ->setTag('a')
           ->setText(pht('Open File'))
-          ->setHref($editor_link)
+          ->setHref($editor_uri)
           ->setIcon('fa-pencil')
           ->setID('editor_link')
-          ->setMetadata(array('link_template' => $template))
-          ->setDisabled(!$editor_link)
-          ->setColor(PHUIButtonView::GREY);
-    }
-
-    $href = null;
-    $show_lint = true;
-    if ($this->getRequest()->getStr('lint') !== null) {
-      $lint_text = pht('Hide Lint');
-      $href = $base_uri->alter('lint', null);
-
-    } else if ($this->lintCommit === null) {
-      $show_lint = false;
-    } else {
-      $lint_text = pht('Show Lint');
-      $href = $this->getDiffusionRequest()->generateURI(array(
-        'action' => 'browse',
-        'commit' => $this->lintCommit,
-      ))->alter('lint', '');
-    }
-
-    if ($show_lint) {
-      $buttons[] =
-        id(new PHUIButtonView())
-          ->setTag('a')
-          ->setText($lint_text)
-          ->setHref($href)
-          ->setIcon('fa-exclamation-triangle')
-          ->setDisabled(!$href)
+          ->setMetadata(array('template' => $editor_template))
+          ->setDisabled(!$editor_uri)
           ->setColor(PHUIButtonView::GREY);
     }
 
@@ -852,11 +551,8 @@ final class DiffusionBrowseController extends DiffusionController {
         $name = idx($spec, 'name', $auto);
         $item->addIcon('fa-code', $name);
 
-        if ($package->getAuditingEnabled()) {
-          $item->addIcon('fa-check', pht('Auditing Enabled'));
-        } else {
-          $item->addIcon('fa-ban', pht('No Auditing'));
-        }
+        $rule = $package->newAuditingRule();
+        $item->addIcon($rule->getIconIcon(), $rule->getDisplayName());
 
         if ($package->isArchived()) {
           $item->setDisabled(true);
@@ -916,465 +612,8 @@ final class DiffusionBrowseController extends DiffusionController {
       ->setTag('a')
       ->setText($text)
       ->setHref($href)
-      ->setIcon($icon);
-  }
-
-  private function buildDisplayRows(
-    array $lines,
-    array $blame_list,
-    array $blame_commits,
-    $show_blame) {
-
-    $request = $this->getRequest();
-    $viewer = $this->getViewer();
-    $drequest = $this->getDiffusionRequest();
-    $repository = $drequest->getRepository();
-
-    $revision_map = array();
-    $revisions = array();
-    if ($blame_commits) {
-      $commit_map = mpull($blame_commits, 'getCommitIdentifier', 'getPHID');
-
-      $revision_ids = id(new DifferentialRevision())
-        ->loadIDsByCommitPHIDs(array_keys($commit_map));
-      if ($revision_ids) {
-        $revisions = id(new DifferentialRevisionQuery())
-          ->setViewer($viewer)
-          ->withIDs($revision_ids)
-          ->execute();
-        $revisions = mpull($revisions, null, 'getID');
-      }
-
-      foreach ($revision_ids as $commit_phid => $revision_id) {
-        $revision_map[$commit_map[$commit_phid]] = $revision_id;
-      }
-    }
-
-    $phids = array();
-    foreach ($blame_commits as $commit) {
-      $author_phid = $commit->getAuthorPHID();
-      if ($author_phid === null) {
-        continue;
-      }
-      $phids[$author_phid] = $author_phid;
-    }
-
-    foreach ($revisions as $revision) {
-      $author_phid = $revision->getAuthorPHID();
-      if ($author_phid === null) {
-        continue;
-      }
-      $phids[$author_phid] = $author_phid;
-    }
-
-    $handles = $viewer->loadHandles($phids);
-
-    $colors = array();
-    if ($blame_commits) {
-      $epochs = array();
-
-      foreach ($blame_commits as $identifier => $commit) {
-        $epochs[$identifier] = $commit->getEpoch();
-      }
-
-      $epoch_list = array_filter($epochs);
-      $epoch_list = array_unique($epoch_list);
-      $epoch_list = array_values($epoch_list);
-
-      $epoch_min   = min($epoch_list);
-      $epoch_max   = max($epoch_list);
-      $epoch_range = ($epoch_max - $epoch_min) + 1;
-
-      foreach ($blame_commits as $identifier => $commit) {
-        $epoch = $epochs[$identifier];
-        if (!$epoch) {
-          $color = '#ffffdd'; // Warning color, missing data.
-        } else {
-          $color_ratio = ($epoch - $epoch_min) / $epoch_range;
-          $color_value = 0xE6 * (1.0 - $color_ratio);
-          $color = sprintf(
-            '#%02x%02x%02x',
-            $color_value,
-            0xF6,
-            $color_value);
-        }
-
-        $colors[$identifier] = $color;
-      }
-    }
-
-    $display = array();
-    $last_identifier = null;
-    $last_color = null;
-    foreach ($lines as $line_index => $line) {
-      $color = '#f6f6f6';
-      $duplicate = false;
-      if (isset($blame_list[$line_index])) {
-        $identifier = $blame_list[$line_index];
-        if (isset($colors[$identifier])) {
-          $color = $colors[$identifier];
-        }
-
-        if ($identifier === $last_identifier) {
-          $duplicate = true;
-        } else {
-          $last_identifier = $identifier;
-        }
-      }
-
-      $display[$line_index] = array(
-        'data' => $line,
-        'target' => false,
-        'highlighted' => false,
-        'color' => $color,
-        'duplicate' => $duplicate,
-      );
-    }
-
-    $line_arr = array();
-    $line_str = $drequest->getLine();
-    $ranges = explode(',', $line_str);
-    foreach ($ranges as $range) {
-      if (strpos($range, '-') !== false) {
-        list($min, $max) = explode('-', $range, 2);
-        $line_arr[] = array(
-          'min' => min($min, $max),
-          'max' => max($min, $max),
-        );
-      } else if (strlen($range)) {
-        $line_arr[] = array(
-          'min' => $range,
-          'max' => $range,
-        );
-      }
-    }
-
-    // Mark the first highlighted line as the target line.
-    if ($line_arr) {
-      $target_line = $line_arr[0]['min'];
-      if (isset($display[$target_line - 1])) {
-        $display[$target_line - 1]['target'] = true;
-      }
-    }
-
-    // Mark all other highlighted lines as highlighted.
-    foreach ($line_arr as $range) {
-      for ($ii = $range['min']; $ii <= $range['max']; $ii++) {
-        if (isset($display[$ii - 1])) {
-          $display[$ii - 1]['highlighted'] = true;
-        }
-      }
-    }
-
-    $engine = null;
-    $inlines = array();
-    if ($this->getRequest()->getStr('lint') !== null && $this->lintMessages) {
-      $engine = new PhabricatorMarkupEngine();
-      $engine->setViewer($viewer);
-
-      foreach ($this->lintMessages as $message) {
-        $inline = id(new PhabricatorAuditInlineComment())
-          ->setSyntheticAuthor(
-            ArcanistLintSeverity::getStringForSeverity($message['severity']).
-            ' '.$message['code'].' ('.$message['name'].')')
-          ->setLineNumber($message['line'])
-          ->setContent($message['description']);
-        $inlines[$message['line']][] = $inline;
-
-        $engine->addObject(
-          $inline,
-          PhabricatorInlineCommentInterface::MARKUP_FIELD_BODY);
-      }
-
-      $engine->process();
-      require_celerity_resource('differential-changeset-view-css');
-    }
-
-    $rows = $this->renderInlines(
-      idx($inlines, 0, array()),
-      $show_blame,
-      (bool)$this->coverage,
-      $engine);
-
-    // NOTE: We're doing this manually because rendering is otherwise
-    // dominated by URI generation for very large files.
-    $line_base = (string)$drequest->generateURI(
-      array(
-        'action'  => 'browse',
-        'stable'  => true,
-      ));
-
-    require_celerity_resource('aphront-tooltip-css');
-    Javelin::initBehavior('phabricator-oncopy');
-    Javelin::initBehavior('phabricator-tooltips');
-    Javelin::initBehavior('phabricator-line-linker');
-
-    // Render these once, since they tend to get repeated many times in large
-    // blame outputs.
-    $commit_links = $this->renderCommitLinks($blame_commits, $handles);
-    $revision_links = $this->renderRevisionLinks($revisions, $handles);
-
-    if ($this->coverage) {
-      require_celerity_resource('differential-changeset-view-css');
-      Javelin::initBehavior(
-        'diffusion-browse-file',
-        array(
-          'labels' => array(
-            'cov-C' => pht('Covered'),
-            'cov-N' => pht('Not Covered'),
-            'cov-U' => pht('Not Executable'),
-          ),
-        ));
-    }
-
-    foreach ($display as $line_index => $line) {
-      $row = array();
-
-      $line_number = $line_index + 1;
-      $line_href = $line_base.'$'.$line_number;
-
-      if (isset($blame_list[$line_index])) {
-        $identifier = $blame_list[$line_index];
-      } else {
-        $identifier = null;
-      }
-
-      $revision_link = null;
-      $commit_link = null;
-      $before_link = null;
-      $commit_date = null;
-
-      $style = 'border-right: 3px solid '.$line['color'].';';
-
-      if ($identifier && !$line['duplicate']) {
-        if (isset($commit_links[$identifier])) {
-          $commit_link = $commit_links[$identifier]['link'];
-          $commit_date = $commit_links[$identifier]['date'];
-        }
-
-        if (isset($revision_map[$identifier])) {
-          $revision_id = $revision_map[$identifier];
-          if (isset($revision_links[$revision_id])) {
-            $revision_link = $revision_links[$revision_id];
-          }
-        }
-
-        $skip_href = $line_href.'?before='.$identifier.'&view=blame';
-        $skip_text = pht('Skip Past This Commit');
-        $icon = id(new PHUIIconView())
-          ->setIcon('fa-caret-square-o-left');
-
-        $before_link = javelin_tag(
-          'a',
-          array(
-            'href'  => $skip_href,
-            'sigil' => 'has-tooltip',
-            'meta'  => array(
-              'tip'     => $skip_text,
-              'align'   => 'E',
-              'size'    => 300,
-            ),
-          ),
-          $icon);
-      }
-
-      if ($show_blame) {
-        $row[] = phutil_tag(
-          'th',
-          array(
-            'class' => 'diffusion-blame-link',
-          ),
-          $before_link);
-
-        $row[] = phutil_tag(
-          'th',
-          array(
-            'class' => 'diffusion-rev-link',
-          ),
-          $commit_link);
-
-        if ($revision_map) {
-          $row[] = phutil_tag(
-            'th',
-            array(
-              'class' => 'diffusion-blame-revision',
-            ),
-            $revision_link);
-        }
-
-        $row[] = phutil_tag(
-          'th',
-          array(
-            'class' => 'diffusion-blame-date',
-          ),
-          $commit_date);
-      }
-
-      $line_link = phutil_tag(
-        'a',
-        array(
-          'href' => $line_href,
-        ),
-        $line_number);
-
-      $row[] = javelin_tag(
-        'th',
-        array(
-          'class' => 'diffusion-line-link ',
-          'sigil' => 'phabricator-source-line',
-          'style' => $style,
-        ),
-        $line_link);
-
-      if ($line['target']) {
-        Javelin::initBehavior(
-          'diffusion-jump-to',
-          array(
-            'target' => 'scroll_target',
-          ));
-        $anchor_text = phutil_tag(
-          'a',
-          array(
-            'id' => 'scroll_target',
-          ),
-          '');
-      } else {
-        $anchor_text = null;
-      }
-
-      $row[] = phutil_tag(
-        'td',
-        array(
-        ),
-        array(
-          $anchor_text,
-
-          // NOTE: See phabricator-oncopy behavior.
-          "\xE2\x80\x8B",
-
-          // TODO: [HTML] Not ideal.
-          phutil_safe_html(str_replace("\t", '  ', $line['data'])),
-        ));
-
-      if ($this->coverage) {
-        $cov_index = $line_index;
-
-        if (isset($this->coverage[$cov_index])) {
-          $cov_class = $this->coverage[$cov_index];
-        } else {
-          $cov_class = 'N';
-        }
-
-        $row[] = phutil_tag(
-          'td',
-          array(
-            'class' => 'cov cov-'.$cov_class,
-          ),
-          '');
-      }
-
-      $rows[] = phutil_tag(
-        'tr',
-        array(
-          'class' => ($line['highlighted'] ?
-                      'phabricator-source-highlight' :
-                      null),
-        ),
-        $row);
-
-      $cur_inlines = $this->renderInlines(
-        idx($inlines, $line_number, array()),
-        $show_blame,
-        $this->coverage,
-        $engine);
-      foreach ($cur_inlines as $cur_inline) {
-        $rows[] = $cur_inline;
-      }
-    }
-
-    return $rows;
-  }
-
-  private function renderInlines(
-    array $inlines,
-    $show_blame,
-    $has_coverage,
-    $engine) {
-
-    $rows = array();
-    foreach ($inlines as $inline) {
-
-      // TODO: This should use modern scaffolding code.
-
-      $inline_view = id(new PHUIDiffInlineCommentDetailView())
-        ->setUser($this->getViewer())
-        ->setMarkupEngine($engine)
-        ->setInlineComment($inline)
-        ->render();
-
-      $row = array_fill(0, ($show_blame ? 3 : 1), phutil_tag('th'));
-
-      $row[] = phutil_tag('td', array(), $inline_view);
-
-      if ($has_coverage) {
-        $row[] = phutil_tag(
-          'td',
-          array(
-            'class' => 'cov cov-I',
-          ));
-      }
-
-      $rows[] = phutil_tag('tr', array('class' => 'inline'), $row);
-    }
-
-    return $rows;
-  }
-
-  private function buildImageCorpus($file_uri) {
-    $properties = new PHUIPropertyListView();
-
-    $properties->addImageContent(
-      phutil_tag(
-        'img',
-        array(
-          'src' => $file_uri,
-        )));
-
-    $this->corpusButtons[] = $this->renderFileButton($file_uri);
-    $title = basename($this->getDiffusionRequest()->getPath());
-    $icon = 'fa-file-image-o';
-    $drequest = $this->getDiffusionRequest();
-    $this->buildActionButtons($drequest);
-    $header = $this->buildPanelHeaderView($title, $icon);
-
-    return id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->addClass('diffusion-mobile-view')
-      ->addPropertyList($properties);
-  }
-
-  private function buildBinaryCorpus($file_uri, $data) {
-    $size = new PhutilNumber(strlen($data));
-    $text = pht('This is a binary file. It is %s byte(s) in length.', $size);
-    $text = id(new PHUIBoxView())
-      ->addPadding(PHUI::PADDING_LARGE)
-      ->appendChild($text);
-
-    $this->corpusButtons[] = $this->renderFileButton($file_uri);
-    $title = basename($this->getDiffusionRequest()->getPath());
-    $icon = 'fa-file';
-    $drequest = $this->getDiffusionRequest();
-    $this->buildActionButtons($drequest);
-    $header = $this->buildPanelHeaderView($title, $icon);
-
-    $box = id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->addClass('diffusion-mobile-view')
-      ->appendChild($text);
-
-    return $box;
+      ->setIcon($icon)
+      ->setColor(PHUIButtonView::GREY);
   }
 
   private function buildErrorCorpus($message) {
@@ -1455,10 +694,17 @@ final class DiffusionBrowseController extends DiffusionController {
         'path'      => $path,
       ));
 
-    $before_uri->setQueryParams($request->getRequestURI()->getQueryParams());
-    $before_uri = $before_uri->alter('before', null);
-    $before_uri = $before_uri->alter('renamed', $renamed);
-    $before_uri = $before_uri->alter('follow', $follow);
+    if ($renamed === null) {
+      $before_uri->removeQueryParam('renamed');
+    } else {
+      $before_uri->replaceQueryParam('renamed', $renamed);
+    }
+
+    if ($follow === null) {
+      $before_uri->removeQueryParam('follow');
+    } else {
+      $before_uri->replaceQueryParam('follow', $follow);
+    }
 
     return id(new AphrontRedirectResponse())->setURI($before_uri);
   }
@@ -1678,17 +924,12 @@ final class DiffusionBrowseController extends DiffusionController {
     $repository = $drequest->getRepository();
     $path = $drequest->getPath();
 
-    $path_map = id(new DiffusionPathIDQuery(array($path)))->loadPathIDs();
-    $path_id = idx($path_map, $path);
-    if (!$path_id) {
-      return null;
-    }
-
     $recent = (PhabricatorTime::getNow() - phutil_units('30 days in seconds'));
 
     $revisions = id(new DifferentialRevisionQuery())
       ->setViewer($viewer)
-      ->withPath($repository->getID(), $path_id)
+      ->withPaths(array($path))
+      ->withRepositoryPHIDs(array($repository->getPHID()))
       ->withIsOpen(true)
       ->withUpdatedEpochBetween($recent, null)
       ->setOrder(DifferentialRevisionQuery::ORDER_MODIFIED)
@@ -1703,16 +944,12 @@ final class DiffusionBrowseController extends DiffusionController {
     }
 
     $header = id(new PHUIHeaderView())
-      ->setHeader(pht('Recently Open Revisions'));
+      ->setHeader(pht('Recent Open Revisions'));
 
     $list = id(new DifferentialRevisionListView())
+      ->setViewer($viewer)
       ->setRevisions($revisions)
-      ->setUser($viewer)
       ->setNoBox(true);
-
-    $phids = $list->getRequiredHandlePHIDs();
-    $handles = $this->loadViewerHandles($phids);
-    $list->setHandles($handles);
 
     $view = id(new PHUIObjectBoxView())
       ->setHeader($header)
@@ -1721,81 +958,6 @@ final class DiffusionBrowseController extends DiffusionController {
       ->appendChild($list);
 
     return $view;
-  }
-
-  private function loadBlame($path, $commit, $timeout) {
-    $blame = $this->callConduitWithDiffusionRequest(
-      'diffusion.blame',
-      array(
-        'commit' => $commit,
-        'paths' => array($path),
-        'timeout' => $timeout,
-      ));
-
-    $identifiers = idx($blame, $path, null);
-
-    if ($identifiers) {
-      $viewer = $this->getViewer();
-      $drequest = $this->getDiffusionRequest();
-      $repository = $drequest->getRepository();
-
-      $commits = id(new DiffusionCommitQuery())
-        ->setViewer($viewer)
-        ->withRepository($repository)
-        ->withIdentifiers($identifiers)
-        ->execute();
-      $commits = mpull($commits, null, 'getCommitIdentifier');
-    } else {
-      $commits = array();
-    }
-
-    return array($identifiers, $commits);
-  }
-
-  private function renderCommitLinks(array $commits, $handles) {
-    $links = array();
-    $viewer = $this->getViewer();
-    foreach ($commits as $identifier => $commit) {
-      $date = phabricator_date($commit->getEpoch(), $viewer);
-      $summary = trim($commit->getSummary());
-
-      $commit_link = phutil_tag(
-        'a',
-        array(
-          'href' => $commit->getURI(),
-        ),
-        $summary);
-
-      $commit_date = phutil_tag(
-        'a',
-        array(
-          'href' => $commit->getURI(),
-        ),
-        $date);
-
-      $links[$identifier]['link'] = $commit_link;
-      $links[$identifier]['date'] = $commit_date;
-    }
-
-    return $links;
-  }
-
-  private function renderRevisionLinks(array $revisions, $handles) {
-    $links = array();
-
-    foreach ($revisions as $revision) {
-      $revision_id = $revision->getID();
-      $revision_link = phutil_tag(
-        'a',
-        array(
-          'href' => '/'.$revision->getMonogram(),
-        ),
-        $revision->getMonogram());
-
-      $links[$revision_id] = $revision_link;
-    }
-
-    return $links;
   }
 
   private function getGitLFSRef(PhabricatorRepository $repository, $data) {
@@ -1843,7 +1005,7 @@ final class DiffusionBrowseController extends DiffusionController {
 
     try {
       $file = $this->loadGitLFSFile($ref);
-      $data = $this->renderGitLFSButton();
+      $this->corpusButtons[] = $this->renderGitLFSButton();
     } catch (Exception $ex) {
       $severity = PHUIInfoView::SEVERITY_ERROR;
       $messages[] = pht('The data for this file could not be loaded.');
@@ -1883,65 +1045,6 @@ final class DiffusionBrowseController extends DiffusionController {
     }
 
     return $file;
-  }
-
-  private function buildBranchTable() {
-    $viewer = $this->getViewer();
-    $drequest = $this->getDiffusionRequest();
-    $repository = $drequest->getRepository();
-
-    $branch = $drequest->getBranch();
-    $default_branch = $repository->getDefaultBranch();
-
-    if ($branch === $default_branch) {
-      return null;
-    }
-
-    $pager = id(new PHUIPagerView())
-      ->setPageSize(10);
-
-    try {
-      $results = $this->callConduitWithDiffusionRequest(
-        'diffusion.historyquery',
-        array(
-          'commit' => $branch,
-          'against' => $default_branch,
-          'path' => $drequest->getPath(),
-          'offset' => $pager->getOffset(),
-          'limit' => $pager->getPageSize() + 1,
-        ));
-    } catch (Exception $ex) {
-      return null;
-    }
-
-    $history = DiffusionPathChange::newFromConduit($results['pathChanges']);
-    $history = $pager->sliceResults($history);
-
-    if (!$history) {
-      return null;
-    }
-
-    $history_table = id(new DiffusionHistoryTableView())
-      ->setViewer($viewer)
-      ->setDiffusionRequest($drequest)
-      ->setHistory($history);
-
-    $history_table->loadRevisions();
-
-    $history_table
-      ->setParents($results['parents'])
-      ->setFilterParents(true)
-      ->setIsHead(true)
-      ->setIsTail(!$pager->getHasMorePages());
-
-    $header = id(new PHUIHeaderView())
-      ->setHeader(pht('%s vs %s', $branch, $default_branch));
-
-    return id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->addClass('diffusion-mobile-view')
-      ->setTable($history_table);
   }
 
 }

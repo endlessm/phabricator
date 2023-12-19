@@ -35,6 +35,7 @@ final class DiffusionLastModifiedController extends DiffusionController {
         ->withRepository($drequest->getRepository())
         ->withIdentifiers(array_values($modified_map))
         ->needCommitData(true)
+        ->needIdentities(true)
         ->execute();
       $commit_map = mpull($commit_map, null, 'getCommitIdentifier');
     } else {
@@ -51,15 +52,6 @@ final class DiffusionLastModifiedController extends DiffusionController {
         }
       }
     }
-
-    $phids = array();
-    foreach ($commits as $commit) {
-      $data = $commit->getCommitData();
-      $phids[] = $data->getCommitDetail('authorPHID');
-      $phids[] = $data->getCommitDetail('committerPHID');
-    }
-    $phids = array_filter($phids);
-    $handles = $this->loadViewerHandles($phids);
 
     $branch = $drequest->loadBranch();
     if ($branch && $commits) {
@@ -83,7 +75,6 @@ final class DiffusionLastModifiedController extends DiffusionController {
 
       $output[$path] = $this->renderColumns(
         $prequest,
-        $handles,
         $commit,
         idx($lint, $path));
     }
@@ -93,11 +84,9 @@ final class DiffusionLastModifiedController extends DiffusionController {
 
   private function renderColumns(
     DiffusionRequest $drequest,
-    array $handles,
     PhabricatorRepositoryCommit $commit = null,
     $lint = null) {
-    assert_instances_of($handles, 'PhabricatorObjectHandle');
-    $viewer = $this->getRequest()->getUser();
+    $viewer = $this->getViewer();
 
     if ($commit) {
       $epoch = $commit->getEpoch();
@@ -111,41 +100,15 @@ final class DiffusionLastModifiedController extends DiffusionController {
     }
 
     $data = $commit->getCommitData();
-    if ($data) {
-      $author_phid = $data->getCommitDetail('authorPHID');
-      if ($author_phid && isset($handles[$author_phid])) {
-        $author = $handles[$author_phid]->renderLink();
-      } else {
-        $author = DiffusionView::renderName($data->getAuthorName());
-      }
-
-      $committer = $data->getCommitDetail('committer');
-      if ($committer) {
-        $committer_phid = $data->getCommitDetail('committerPHID');
-        if ($committer_phid && isset($handles[$committer_phid])) {
-          $committer = $handles[$committer_phid]->renderLink();
-        } else {
-          $committer = DiffusionView::renderName($committer);
-        }
-        if ($author != $committer) {
-          $author = hsprintf('%s/%s', $author, $committer);
-        }
-      }
-
-      $details = DiffusionView::linkDetail(
-        $drequest->getRepository(),
-        $commit->getCommitIdentifier(),
-        $data->getSummary());
-      $details = AphrontTableView::renderSingleDisplayLine($details);
-    } else {
-      $author = '';
-      $details = '';
-    }
+    $details = DiffusionView::linkDetail(
+      $drequest->getRepository(),
+      $commit->getCommitIdentifier(),
+      $data->getSummary());
+    $details = AphrontTableView::renderSingleDisplayLine($details);
 
     $return = array(
       'commit'    => $modified,
       'date'      => $date,
-      'author'    => $author,
       'details'   => $details,
     );
 

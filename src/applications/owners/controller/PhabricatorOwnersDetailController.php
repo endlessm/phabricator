@@ -65,13 +65,13 @@ final class PhabricatorOwnersDetailController
 
     $commit_views = array();
 
-    $commit_uri = id(new PhutilURI('/diffusion/commit/'))
-      ->setQueryParams(
-        array(
-          'package' => $package->getPHID(),
-        ));
+    $params = array(
+      'package' => $package->getPHID(),
+    );
 
-    $status_concern = PhabricatorAuditCommitStatusConstants::CONCERN_RAISED;
+    $commit_uri = new PhutilURI('/diffusion/commit/', $params);
+
+    $status_concern = DiffusionCommitAuditStatus::CONCERN_RAISED;
 
     $attention_commits = id(new DiffusionCommitQuery())
       ->setViewer($request->getUser())
@@ -82,12 +82,15 @@ final class PhabricatorOwnersDetailController
         ))
       ->needCommitData(true)
       ->needAuditRequests(true)
+      ->needIdentities(true)
       ->setLimit(10)
       ->execute();
-    $view = id(new PhabricatorAuditListView())
-      ->setUser($viewer)
-      ->setNoDataString(pht('This package has no open problem commits.'))
-      ->setCommits($attention_commits);
+    $view = id(new DiffusionCommitGraphView())
+      ->setViewer($viewer)
+      ->setCommits($attention_commits)
+      ->newObjectItemListView();
+
+    $view->setNoDataString(pht('This package has no open problem commits.'));
 
     $commit_views[] = array(
       'view'    => $view,
@@ -105,13 +108,16 @@ final class PhabricatorOwnersDetailController
       ->withPackagePHIDs(array($package->getPHID()))
       ->needCommitData(true)
       ->needAuditRequests(true)
+      ->needIdentities(true)
       ->setLimit(25)
       ->execute();
 
-    $view = id(new PhabricatorAuditListView())
-      ->setUser($viewer)
+    $view = id(new DiffusionCommitGraphView())
+      ->setViewer($viewer)
       ->setCommits($all_commits)
-      ->setNoDataString(pht('No commits in this package.'));
+      ->newObjectItemListView();
+
+    $view->setNoDataString(pht('No commits in this package.'));
 
     $commit_views[] = array(
       'view'    => $view,
@@ -144,6 +150,8 @@ final class PhabricatorOwnersDetailController
     $crumbs->addTextCrumb($package->getMonogram());
     $crumbs->setBorder(true);
 
+    $rules_view = $this->newRulesView($package);
+
     $timeline = $this->buildTransactionTimeline(
       $package,
       new PhabricatorOwnersPackageTransactionQuery());
@@ -154,6 +162,7 @@ final class PhabricatorOwnersDetailController
       ->setCurtain($curtain)
       ->setMainColumn(array(
         $this->renderPathsTable($paths, $repositories),
+        $rules_view,
         $commit_panels,
         $timeline,
       ))
@@ -188,18 +197,30 @@ final class PhabricatorOwnersDetailController
     $name = idx($spec, 'short', $dominion);
     $view->addProperty(pht('Dominion'), $name);
 
+    $authority_mode = $package->getAuthorityMode();
+    $authority_map = PhabricatorOwnersPackage::getAuthorityOptionsMap();
+    $spec = idx($authority_map, $authority_mode, array());
+    $name = idx($spec, 'short', $authority_mode);
+    $view->addProperty(pht('Authority'), $name);
+
     $auto = $package->getAutoReview();
     $autoreview_map = PhabricatorOwnersPackage::getAutoreviewOptionsMap();
     $spec = idx($autoreview_map, $auto, array());
     $name = idx($spec, 'name', $auto);
     $view->addProperty(pht('Auto Review'), $name);
 
-    if ($package->getAuditingEnabled()) {
-      $auditing = pht('Enabled');
+    $rule = $package->newAuditingRule();
+    $view->addProperty(pht('Auditing'), $rule->getDisplayName());
+
+    $ignored = $package->getIgnoredPathAttributes();
+    $ignored = array_keys($ignored);
+    if ($ignored) {
+      $ignored = implode(', ', $ignored);
     } else {
-      $auditing = pht('Disabled');
+      $ignored = phutil_tag('em', array(), pht('None'));
     }
-    $view->addProperty(pht('Auditing'), $auditing);
+
+    $view->addProperty(pht('Ignored Attributes'), $ignored);
 
     $description = $package->getDescription();
     if (strlen($description)) {
@@ -279,7 +300,7 @@ final class PhabricatorOwnersDetailController
       $href = $repo->generateURI(
         array(
           'branch'   => $repo->getDefaultBranch(),
-          'path'     => $path->getPath(),
+          'path'     => $path->getPathDisplay(),
           'action'   => 'browse',
         ));
 
@@ -288,7 +309,7 @@ final class PhabricatorOwnersDetailController
         array(
           'href' => (string)$href,
         ),
-        $path->getPath());
+        $path->getPathDisplay());
 
       $rows[] = array(
         ($path->getExcluded() ? '-' : '+'),
@@ -337,6 +358,57 @@ final class PhabricatorOwnersDetailController
       ->setTable($table);
 
     return $box;
+  }
+
+  private function newRulesView(PhabricatorOwnersPackage $package) {
+    $viewer = $this->getViewer();
+
+    $limit = 10;
+    $rules = id(new HeraldRuleQuery())
+      ->setViewer($viewer)
+      ->withDisabled(false)
+      ->withAffectedObjectPHIDs(array($package->getPHID()))
+      ->needValidateAuthors(true)
+      ->setLimit($limit + 1)
+      ->execute();
+
+    $more_results = (count($rules) > $limit);
+    $rules = array_slice($rules, 0, $limit);
+
+    $list = id(new HeraldRuleListView())
+      ->setViewer($viewer)
+      ->setRules($rules)
+      ->newObjectList();
+
+    $list->setNoDataString(
+      pht(
+        'No active Herald rules add this package as an auditor, reviewer, '.
+        'or subscriber.'));
+
+    $more_href = new PhutilURI(
+      '/herald/',
+      array('affectedPHID' => $package->getPHID()));
+
+    if ($more_results) {
+      $list->newTailButton()
+        ->setHref($more_href);
+    }
+
+    $more_link = id(new PHUIButtonView())
+      ->setTag('a')
+      ->setIcon('fa-list-ul')
+      ->setText(pht('View All Rules'))
+      ->setHref($more_href);
+
+    $header = id(new PHUIHeaderView())
+      ->setHeader(pht('Affected By Herald Rules'))
+      ->setHeaderIcon(id(new PhabricatorHeraldApplication())->getIcon())
+      ->addActionLink($more_link);
+
+    return id(new PHUIObjectBoxView())
+      ->setHeader($header)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->appendChild($list);
   }
 
 }

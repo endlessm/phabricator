@@ -99,17 +99,20 @@ final class PhabricatorConduitAPIController
         list($error_code, $error_info) = $auth_error;
       }
     } catch (Exception $ex) {
-      if (!($ex instanceof ConduitMethodNotFoundException)) {
+      $result = null;
+
+      if ($ex instanceof ConduitException) {
+        $error_code = 'ERR-CONDUIT-CALL';
+      } else {
+        $error_code = 'ERR-CONDUIT-CORE';
+
+        // See T13581. When a Conduit method raises an uncaught exception
+        // other than a "ConduitException", log it.
         phlog($ex);
       }
-      $result = null;
-      $error_code = ($ex instanceof ConduitException
-        ? 'ERR-CONDUIT-CALL'
-        : 'ERR-CONDUIT-CORE');
+
       $error_info = $ex->getMessage();
     }
-
-    $time_end = microtime(true);
 
     $log
       ->setCallerPHID(
@@ -117,7 +120,7 @@ final class PhabricatorConduitAPIController
           ? $conduit_user->getPHID()
           : null)
       ->setError((string)$error_code)
-      ->setDuration(1000000 * ($time_end - $time_start));
+      ->setDuration(phutil_microseconds_since($time_start));
 
     if (!PhabricatorEnv::isReadOnly()) {
       $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
@@ -139,9 +142,17 @@ final class PhabricatorConduitAPIController
           $method_implementation);
       case 'json':
       default:
-        return id(new AphrontJSONResponse())
+        $response = id(new AphrontJSONResponse())
           ->setAddJSONShield(false)
           ->setContent($response->toDictionary());
+
+        $capabilities = $this->getConduitCapabilities();
+        if ($capabilities) {
+          $capabilities = implode(' ', $capabilities);
+          $response->addHeader('X-Conduit-Capabilities', $capabilities);
+        }
+
+        return $response;
     }
   }
 
@@ -211,9 +222,14 @@ final class PhabricatorConduitAPIController
         ->withIsActive(true)
         ->executeOne();
       if (!$stored_key) {
+        $key_summary = id(new PhutilUTF8StringTruncator())
+          ->setMaximumBytes(64)
+          ->truncateString($raw_key);
         return array(
           'ERR-INVALID-AUTH',
-          pht('No user or device is associated with that public key.'),
+          pht(
+            'No user or device is associated with the public key "%s".',
+            $key_summary),
         );
       }
 
@@ -222,6 +238,16 @@ final class PhabricatorConduitAPIController
       if ($object instanceof PhabricatorUser) {
         $user = $object;
       } else {
+        if ($object->isDisabled()) {
+          return array(
+            'ERR-INVALID-AUTH',
+            pht(
+              'The key which signed this request is associated with a '.
+              'disabled device ("%s").',
+              $object->getName()),
+          );
+        }
+
         if (!$stored_key->getIsTrusted()) {
           return array(
             'ERR-INVALID-AUTH',
@@ -235,9 +261,9 @@ final class PhabricatorConduitAPIController
           return array(
             'ERR-INVALID-AUTH',
             pht(
-              'This request originates from outside of the Phabricator '.
-              'cluster address range. Requests signed with trusted '.
-              'device keys must originate from within the cluster.'),
+              'This request originates from outside of the cluster address '.
+              'range. Requests signed with trusted device keys must '.
+              'originate from within the cluster.'),
           );
         }
 
@@ -338,9 +364,9 @@ final class PhabricatorConduitAPIController
           return array(
             'ERR-INVALID-AUTH',
             pht(
-              'This request originates from outside of the Phabricator '.
-              'cluster address range. Requests signed with cluster API '.
-              'tokens must originate from within the cluster.'),
+              'This request originates from outside of the cluster address '.
+              'range. Requests signed with cluster API tokens must '.
+              'originate from within the cluster.'),
           );
         }
 
@@ -602,6 +628,15 @@ final class PhabricatorConduitAPIController
     AphrontRequest $request,
     $method) {
 
+    $content_type = $request->getHTTPHeader('Content-Type');
+
+    if ($content_type == 'application/json') {
+      throw new Exception(
+        pht('Use form-encoded data to submit parameters to Conduit endpoints. '.
+            'Sending a JSON-encoded body and setting \'Content-Type\': '.
+            '\'application/json\' is not currently supported.'));
+    }
+
     // Look for parameters from the Conduit API Console, which are encoded
     // as HTTP POST parameters in an array, e.g.:
     //
@@ -707,5 +742,14 @@ final class PhabricatorConduitAPIController
     return false;
   }
 
+  private function getConduitCapabilities() {
+    $capabilities = array();
+
+    if (AphrontRequestStream::supportsGzip()) {
+      $capabilities[] = 'gzip';
+    }
+
+    return $capabilities;
+  }
 
 }

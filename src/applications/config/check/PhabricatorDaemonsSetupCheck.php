@@ -8,25 +8,31 @@ final class PhabricatorDaemonsSetupCheck extends PhabricatorSetupCheck {
 
   protected function executeChecks() {
 
-    $task_daemon = id(new PhabricatorDaemonLogQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withStatus(PhabricatorDaemonLogQuery::STATUS_ALIVE)
-      ->withDaemonClasses(array('PhabricatorTaskmasterDaemon'))
-      ->setLimit(1)
-      ->execute();
+    try {
+      $task_daemons = id(new PhabricatorDaemonLogQuery())
+        ->setViewer(PhabricatorUser::getOmnipotentUser())
+        ->withStatus(PhabricatorDaemonLogQuery::STATUS_ALIVE)
+        ->withDaemonClasses(array('PhabricatorTaskmasterDaemon'))
+        ->setLimit(1)
+        ->execute();
 
-    if (!$task_daemon) {
+      $no_daemons = !$task_daemons;
+    } catch (Exception $ex) {
+      // Just skip this warning if the query fails for some reason.
+      $no_daemons = false;
+    }
+
+    if ($no_daemons) {
       $doc_href = PhabricatorEnv::getDoclink('Managing Daemons with phd');
 
       $summary = pht(
-        'You must start the Phabricator daemons to send email, rebuild '.
-        'search indexes, and do other background processing.');
+        'You must start the daemons to send email, rebuild search indexes, '.
+        'and do other background processing.');
 
       $message = pht(
-        'The Phabricator daemons are not running, so Phabricator will not '.
-        'be able to perform background processing (including sending email, '.
-        'rebuilding search indexes, importing commits, cleaning up old data, '.
-        'and running builds).'.
+        'The daemons are not running, background processing (including '.
+        'sending email, rebuilding search indexes, importing commits, '.
+        'cleaning up old data, and running builds) can not be performed.'.
         "\n\n".
         'Use %s to start daemons. See %s for more information.',
         phutil_tag('tt', array(), 'bin/phd start'),
@@ -40,18 +46,25 @@ final class PhabricatorDaemonsSetupCheck extends PhabricatorSetupCheck {
 
       $this->newIssue('daemons.not-running')
         ->setShortName(pht('Daemons Not Running'))
-        ->setName(pht('Phabricator Daemons Are Not Running'))
+        ->setName(pht('Daemons Are Not Running'))
         ->setSummary($summary)
         ->setMessage($message)
-        ->addCommand('phabricator/ $ ./bin/phd start');
+        ->addCommand('$ ./bin/phd start');
     }
 
     $expect_user = PhabricatorEnv::getEnvConfig('phd.user');
     if (strlen($expect_user)) {
-      $all_daemons = id(new PhabricatorDaemonLogQuery())
-        ->setViewer(PhabricatorUser::getOmnipotentUser())
-        ->withStatus(PhabricatorDaemonLogQuery::STATUS_ALIVE)
-        ->execute();
+
+      try {
+        $all_daemons = id(new PhabricatorDaemonLogQuery())
+          ->setViewer(PhabricatorUser::getOmnipotentUser())
+          ->withStatus(PhabricatorDaemonLogQuery::STATUS_ALIVE)
+          ->execute();
+      } catch (Exception $ex) {
+        // If this query fails for some reason, just skip this check.
+        $all_daemons = array();
+      }
+
       foreach ($all_daemons as $daemon) {
         $actual_user = $daemon->getRunningAsUser();
         if ($actual_user == $expect_user) {
@@ -77,7 +90,7 @@ final class PhabricatorDaemonsSetupCheck extends PhabricatorSetupCheck {
           ->setSummary($summary)
           ->setMessage($message)
           ->addPhabricatorConfig('phd.user')
-          ->addCommand('phabricator/ $ ./bin/phd restart');
+          ->addCommand('$ ./bin/phd restart');
 
         break;
       }

@@ -36,7 +36,7 @@ final class DiffusionCommitResignTransaction
   }
 
   public function applyExternalEffects($object, $value) {
-    $status = PhabricatorAuditStatusConstants::RESIGNED;
+    $status = PhabricatorAuditRequestStatus::RESIGNED;
     $actor = $this->getActor();
     $this->applyAuditorEffect($object, $actor, $value, $status);
   }
@@ -61,6 +61,14 @@ final class DiffusionCommitResignTransaction
       '%s resigned from %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'resign';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

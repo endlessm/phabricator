@@ -199,18 +199,19 @@ abstract class DrydockWorker extends PhabricatorWorker {
     $viewer = $this->getViewer();
 
     // Don't reclaim a resource if it has been updated recently. If two
-    // leases are fighting, we don't want them to keep reclaming resources
+    // leases are fighting, we don't want them to keep reclaiming resources
     // from one another forever without making progress, so make resources
     // immune to reclamation for a little while after they activate or update.
+
+    $now = PhabricatorTime::getNow();
+    $max_epoch = ($now - phutil_units('3 minutes in seconds'));
 
     // TODO: It would be nice to use a more narrow time here, like "last
     // activation or lease release", but we don't currently store that
     // anywhere.
 
     $updated = $resource->getDateModified();
-    $now = PhabricatorTime::getNow();
-    $ago = ($now - $updated);
-    if ($ago < phutil_units('3 minutes in seconds')) {
+    if ($updated > $max_epoch) {
       return false;
     }
 
@@ -233,6 +234,21 @@ abstract class DrydockWorker extends PhabricatorWorker {
       return false;
     }
 
+    // See T13676. Don't reclaim a resource if a lease recently released.
+    $leases = id(new DrydockLeaseQuery())
+      ->setViewer($viewer)
+      ->withResourcePHIDs(array($resource->getPHID()))
+      ->withStatuses(
+        array(
+          DrydockLeaseStatus::STATUS_DESTROYED,
+        ))
+      ->withDateModifiedBetween($max_epoch, null)
+      ->setLimit(1)
+      ->execute();
+    if ($leases) {
+      return false;
+    }
+
     return true;
   }
 
@@ -241,11 +257,25 @@ abstract class DrydockWorker extends PhabricatorWorker {
     DrydockLease $lease) {
     $viewer = $this->getViewer();
 
+    // Mark the lease as reclaiming this resource. It won't be allowed to start
+    // another reclaim as long as this resource is still in the process of
+    // being reclaimed.
+    $lease->addReclaimedResourcePHIDs(array($resource->getPHID()));
+
+    // When the resource releases, we we want to reawaken this task since it
+    // should (usually) be able to start building a new resource right away.
+    $worker_task_id = $this->getCurrentWorkerTaskID();
+
     $command = DrydockCommand::initializeNewCommand($viewer)
       ->setTargetPHID($resource->getPHID())
       ->setAuthorPHID($lease->getPHID())
       ->setCommand(DrydockCommand::COMMAND_RECLAIM)
-      ->save();
+      ->setProperty('awakenTaskIDs', array($worker_task_id));
+
+    $lease->openTransaction();
+      $lease->save();
+      $command->save();
+    $lease->saveTransaction();
 
     $resource->scheduleUpdate();
 

@@ -43,13 +43,13 @@ final class PhabricatorPolicyQuery
 
   public static function renderPolicyDescriptions(
     PhabricatorUser $viewer,
-    PhabricatorPolicyInterface $object,
-    $icon = false) {
+    PhabricatorPolicyInterface $object) {
 
     $policies = self::loadPolicies($viewer, $object);
 
     foreach ($policies as $capability => $policy) {
-      $policies[$capability] = $policy->renderDescription($icon);
+      $policies[$capability] = $policy->newRef($viewer)
+        ->newCapabilityLink($object, $capability);
     }
 
     return $policies;
@@ -290,6 +290,10 @@ final class PhabricatorPolicyQuery
   }
 
   public static function isSpecialPolicy($identifier) {
+    if ($identifier === null) {
+      return true;
+    }
+
     if (self::isObjectPolicy($identifier)) {
       return true;
     }

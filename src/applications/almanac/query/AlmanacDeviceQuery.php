@@ -8,6 +8,8 @@ final class AlmanacDeviceQuery
   private $names;
   private $namePrefix;
   private $nameSuffix;
+  private $isClusterDevice;
+  private $statuses;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -34,18 +36,24 @@ final class AlmanacDeviceQuery
     return $this;
   }
 
+  public function withStatuses(array $statuses) {
+    $this->statuses = $statuses;
+    return $this;
+  }
+
   public function withNameNgrams($ngrams) {
     return $this->withNgramsConstraint(
       new AlmanacDeviceNameNgrams(),
       $ngrams);
   }
 
-  public function newResultObject() {
-    return new AlmanacDevice();
+  public function withIsClusterDevice($is_cluster_device) {
+    $this->isClusterDevice = $is_cluster_device;
+    return $this;
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
+  public function newResultObject() {
+    return new AlmanacDevice();
   }
 
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
@@ -90,6 +98,20 @@ final class AlmanacDeviceQuery
         $this->nameSuffix);
     }
 
+    if ($this->isClusterDevice !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'device.isBoundToClusterService = %d',
+        (int)$this->isClusterDevice);
+    }
+
+    if ($this->statuses !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'device.status IN (%Ls)',
+        $this->statuses);
+    }
+
     return $where;
   }
 
@@ -109,11 +131,10 @@ final class AlmanacDeviceQuery
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $device = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      'id' => $device->getID(),
-      'name' => $device->getName(),
+      'id' => (int)$object->getID(),
+      'name' => $object->getName(),
     );
   }
 

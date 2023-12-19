@@ -11,7 +11,7 @@ final class PhabricatorLDAPAuthProvider extends PhabricatorAuthProvider {
   public function getDescriptionForCreate() {
     return pht(
       'Configure a connection to an LDAP server so that users can use their '.
-      'LDAP credentials to log in to Phabricator.');
+      'LDAP credentials to log in.');
   }
 
   public function getDefaultProviderConfig() {
@@ -112,6 +112,7 @@ final class PhabricatorLDAPAuthProvider extends PhabricatorAuthProvider {
         id(new AphrontFormTextControl())
           ->setLabel(pht('LDAP Username'))
           ->setName('ldap_username')
+          ->setAutofocus(true)
           ->setValue($v_user)
           ->setError($e_user))
       ->appendChild(
@@ -163,7 +164,7 @@ final class PhabricatorLDAPAuthProvider extends PhabricatorAuthProvider {
           // See T3351.
 
           DarkConsoleErrorLogPluginAPI::enableDiscardMode();
-            $account_id = $adapter->getAccountID();
+            $identifiers = $adapter->getAccountIdentifiers();
           DarkConsoleErrorLogPluginAPI::disableDiscardMode();
         } else {
           throw new Exception(pht('Username and password are required!'));
@@ -179,7 +180,9 @@ final class PhabricatorLDAPAuthProvider extends PhabricatorAuthProvider {
       }
     }
 
-    return array($this->loadOrCreateAccount($account_id), $response);
+    $account = $this->newExternalAccountForIdentifiers($identifiers);
+
+    return array($account, $response);
   }
 
 
@@ -192,6 +195,7 @@ final class PhabricatorLDAPAuthProvider extends PhabricatorAuthProvider {
   const KEY_VERSION                 = 'ldap:version';
   const KEY_REFERRALS               = 'ldap:referrals';
   const KEY_START_TLS               = 'ldap:start-tls';
+  // TODO: This is misspelled! See T13005.
   const KEY_ANONYMOUS_USERNAME      = 'ldap:anoynmous-username';
   const KEY_ANONYMOUS_PASSWORD      = 'ldap:anonymous-password';
   const KEY_ALWAYS_SEARCH           = 'ldap:always-search';
@@ -308,8 +312,8 @@ final class PhabricatorLDAPAuthProvider extends PhabricatorAuthProvider {
 
     $instructions = array(
       self::KEY_SEARCH_ATTRIBUTES   => pht(
-        "When a user types their LDAP username and password into Phabricator, ".
-        "Phabricator can either bind to LDAP with those credentials directly ".
+        "When a user provides their LDAP username and password, this ".
+        "software can either bind to LDAP with those credentials directly ".
         "(which is simpler, but not as powerful) or bind to LDAP with ".
         "anonymous credentials, then search for record matching the supplied ".
         "credentials (which is more complicated, but more powerful).\n\n".

@@ -31,7 +31,7 @@ final class PhabricatorSecuritySetupCheck extends PhabricatorSetupCheck {
         "\n\n".
         'Upgrade %s to a patched version.'.
         "\n\n".
-        'To learn more about how this issue affects Phabricator, see %s.',
+        'To learn more about how this issue affects this software, see %s.',
         phutil_tag('tt', array(), 'bash'),
         phutil_tag('tt', array(), 'bash'),
         phutil_tag(
@@ -58,11 +58,10 @@ final class PhabricatorSecuritySetupCheck extends PhabricatorSetupCheck {
         ->setName(pht('Alternate File Domain Not Configured'))
         ->setSummary(
           pht(
-            'Increase security (and improve performance) by configuring '.
-            'a CDN or alternate file domain.'))
+            'Improve security by configuring an alternate file domain.'))
         ->setMessage(
           pht(
-            'Phabricator is currently configured to serve user uploads '.
+            'This software is currently configured to serve user uploads '.
             'directly from the same domain as other content. This is a '.
             'security risk.'.
             "\n\n".

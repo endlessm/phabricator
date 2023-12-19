@@ -11,9 +11,11 @@ final class PhabricatorAuthRegisterController
     $viewer = $this->getViewer();
     $account_key = $request->getURIData('akey');
 
-    if ($request->getUser()->isLoggedIn()) {
+    if ($viewer->isLoggedIn()) {
       return id(new AphrontRedirectResponse())->setURI('/');
     }
+
+    $invite = $this->loadInvite();
 
     $is_setup = false;
     if (strlen($account_key)) {
@@ -21,11 +23,13 @@ final class PhabricatorAuthRegisterController
       list($account, $provider, $response) = $result;
       $is_default = false;
     } else if ($this->isFirstTimeSetup()) {
-      list($account, $provider, $response) = $this->loadSetupAccount();
+      $account = null;
+      $provider = null;
+      $response = null;
       $is_default = true;
       $is_setup = true;
     } else {
-      list($account, $provider, $response) = $this->loadDefaultAccount();
+      list($account, $provider, $response) = $this->loadDefaultAccount($invite);
       $is_default = true;
     }
 
@@ -33,24 +37,24 @@ final class PhabricatorAuthRegisterController
       return $response;
     }
 
-    $invite = $this->loadInvite();
+    if (!$is_setup) {
+      if (!$provider->shouldAllowRegistration()) {
+        if ($invite) {
+          // If the user has an invite, we allow them to register with any
+          // provider, even a login-only provider.
+        } else {
+          // TODO: This is a routine error if you click "Login" on an external
+          // auth source which doesn't allow registration. The error should be
+          // more tailored.
 
-    if (!$provider->shouldAllowRegistration()) {
-      if ($invite) {
-        // If the user has an invite, we allow them to register with any
-        // provider, even a login-only provider.
-      } else {
-        // TODO: This is a routine error if you click "Login" on an external
-        // auth source which doesn't allow registration. The error should be
-        // more tailored.
-
-        return $this->renderError(
-          pht(
-            'The account you are attempting to register with uses an '.
-            'authentication provider ("%s") which does not allow '.
-            'registration. An administrator may have recently disabled '.
-            'registration with this provider.',
-            $provider->getProviderName()));
+          return $this->renderError(
+            pht(
+              'The account you are attempting to register with uses an '.
+              'authentication provider ("%s") which does not allow '.
+              'registration. An administrator may have recently disabled '.
+              'registration with this provider.',
+              $provider->getProviderName()));
+        }
       }
     }
 
@@ -58,10 +62,18 @@ final class PhabricatorAuthRegisterController
 
     $user = new PhabricatorUser();
 
-    $default_username = $account->getUsername();
-    $default_realname = $account->getRealName();
+    if ($is_setup) {
+      $default_username = null;
+      $default_realname = null;
+      $default_email = null;
+    } else {
+      $default_username = $account->getUsername();
+      $default_realname = $account->getRealName();
+      $default_email = $account->getEmail();
+    }
 
-    $default_email = $account->getEmail();
+    $account_type = PhabricatorAuthPassword::PASSWORD_TYPE_ACCOUNT;
+    $content_source = PhabricatorContentSource::newFromRequest($request);
 
     if ($invite) {
       $default_email = $invite->getEmailAddress();
@@ -71,15 +83,15 @@ final class PhabricatorAuthRegisterController
       if (!PhabricatorUserEmail::isValidAddress($default_email)) {
         $errors[] = pht(
           'The email address associated with this external account ("%s") is '.
-          'not a valid email address and can not be used to register a '.
-          'Phabricator account. Choose a different, valid address.',
+          'not a valid email address and can not be used to register an '.
+          'account. Choose a different, valid address.',
           phutil_tag('strong', array(), $default_email));
         $default_email = null;
       }
     }
 
     if ($default_email !== null) {
-      // We should bypass policy here becase e.g. limiting an application use
+      // We should bypass policy here because e.g. limiting an application use
       // to a subset of users should not allow the others to overwrite
       // configured application emails.
       $application_email = id(new PhabricatorMetaMTAApplicationEmailQuery())
@@ -90,8 +102,7 @@ final class PhabricatorAuthRegisterController
         $errors[] = pht(
           'The email address associated with this account ("%s") is '.
           'already in use by an application and can not be used to '.
-          'register a new Phabricator account. Choose a different, valid '.
-          'address.',
+          'register a new account. Choose a different, valid address.',
           phutil_tag('strong', array(), $default_email));
         $default_email = null;
       }
@@ -110,8 +121,8 @@ final class PhabricatorAuthRegisterController
           array(
             pht(
               'The account you are attempting to register with has an invalid '.
-              'email address (%s). This Phabricator install only allows '.
-              'registration with specific email addresses:',
+              'email address (%s). This server only allows registration with '.
+              'specific email addresses:',
               $debug_email),
             phutil_tag('br'),
             phutil_tag('br'),
@@ -145,16 +156,17 @@ final class PhabricatorAuthRegisterController
           ->addHiddenInput('phase', 1)
           ->appendParagraph(
             pht(
-              'You are creating a new Phabricator account linked to an '.
-              'existing external account from outside Phabricator.'))
+              'You are creating a new account linked to an existing '.
+              'external account.'))
           ->appendParagraph(
             pht(
               'The email address ("%s") associated with the external account '.
-              'is already in use by an existing Phabricator account. Multiple '.
-              'Phabricator accounts may not have the same email address, so '.
-              'you can not use this email address to register a new '.
-              'Phabricator account.',
-              phutil_tag('strong', array(), $show_existing)))
+              'is already in use by an existing %s account. Multiple '.
+              '%s accounts may not have the same email address, so '.
+              'you can not use this email address to register a new account.',
+              phutil_tag('strong', array(), $show_existing),
+              PlatformSymbols::getPlatformServerName(),
+              PlatformSymbols::getPlatformServerName()))
           ->appendParagraph(
             pht(
               'If you want to register a new account, continue with this '.
@@ -162,10 +174,11 @@ final class PhabricatorAuthRegisterController
               'for the new account.'))
           ->appendParagraph(
             pht(
-              'If you want to link an existing Phabricator account to this '.
+              'If you want to link an existing %s account to this '.
               'external account, do not continue. Instead: log in to your '.
               'existing account, then go to "Settings" and link the account '.
-              'in the "External Accounts" panel.'))
+              'in the "External Accounts" panel.',
+              PlatformSymbols::getPlatformServerName()))
           ->appendParagraph(
             pht(
               'If you continue, you will create a new account. You will not '.
@@ -175,10 +188,10 @@ final class PhabricatorAuthRegisterController
       } else {
         $errors[] = pht(
           'The external account you are registering with has an email address '.
-          'that is already in use ("%s") by an existing Phabricator account. '.
-          'Choose a new, valid email address to register a new Phabricator '.
-          'account.',
-          phutil_tag('strong', array(), $show_existing));
+          'that is already in use ("%s") by an existing %s account. '.
+          'Choose a new, valid email address to register a new account.',
+          phutil_tag('strong', array(), $show_existing),
+          PlatformSymbols::getPlatformServerName());
       }
     }
 
@@ -209,7 +222,11 @@ final class PhabricatorAuthRegisterController
     $can_edit_email = $profile->getCanEditEmail();
     $can_edit_realname = $profile->getCanEditRealName();
 
-    $must_set_password = $provider->shouldRequireRegistrationPassword();
+    if ($is_setup) {
+      $must_set_password = false;
+    } else {
+      $must_set_password = $provider->shouldRequireRegistrationPassword();
+    }
 
     $can_edit_anything = $profile->getCanEditAnything() || $must_set_password;
     $force_verify = $profile->getShouldVerifyEmail();
@@ -285,27 +302,22 @@ final class PhabricatorAuthRegisterController
       if ($must_set_password) {
         $value_password = $request->getStr('password');
         $value_confirm = $request->getStr('confirm');
-        if (!strlen($value_password)) {
-          $e_password = pht('Required');
-          $errors[] = pht('You must choose a password.');
-        } else if ($value_password !== $value_confirm) {
-          $e_password = pht('No Match');
-          $errors[] = pht('Password and confirmation must match.');
-        } else if (strlen($value_password) < $min_len) {
-          $e_password = pht('Too Short');
-          $errors[] = pht(
-            'Password is too short (must be at least %d characters long).',
-            $min_len);
-        } else if (
-          PhabricatorCommonPasswords::isCommonPassword($value_password)) {
 
-          $e_password = pht('Very Weak');
-          $errors[] = pht(
-            'Password is pathologically weak. This password is one of the '.
-            'most common passwords in use, and is extremely easy for '.
-            'attackers to guess. You must choose a stronger password.');
-        } else {
+        $password_envelope = new PhutilOpaqueEnvelope($value_password);
+        $confirm_envelope = new PhutilOpaqueEnvelope($value_confirm);
+
+        $engine = id(new PhabricatorAuthPasswordEngine())
+          ->setViewer($user)
+          ->setContentSource($content_source)
+          ->setPasswordType($account_type)
+          ->setObject($user);
+
+        try {
+          $engine->checkNewPassword($password_envelope, $confirm_envelope);
           $e_password = null;
+        } catch (PhabricatorAuthPasswordException $ex) {
+          $errors[] = $ex->getMessage();
+          $e_password = $ex->getPasswordError();
         }
       }
 
@@ -336,9 +348,11 @@ final class PhabricatorAuthRegisterController
       }
 
       if (!$errors) {
-        $image = $this->loadProfilePicture($account);
-        if ($image) {
-          $user->setProfileImagePHID($image->getPHID());
+        if (!$is_setup) {
+          $image = $this->loadProfilePicture($account);
+          if ($image) {
+            $user->setProfileImagePHID($image->getPHID());
+          }
         }
 
         try {
@@ -348,17 +362,19 @@ final class PhabricatorAuthRegisterController
             $verify_email = true;
           }
 
-          if ($value_email === $default_email) {
-            if ($account->getEmailVerified()) {
-              $verify_email = true;
-            }
+          if (!$is_setup) {
+            if ($value_email === $default_email) {
+              if ($account->getEmailVerified()) {
+                $verify_email = true;
+              }
 
-            if ($provider->shouldTrustEmails()) {
-              $verify_email = true;
-            }
+              if ($provider->shouldTrustEmails()) {
+                $verify_email = true;
+              }
 
-            if ($invite) {
-              $verify_email = true;
+              if ($invite) {
+                $verify_email = true;
+              }
             }
           }
 
@@ -408,17 +424,42 @@ final class PhabricatorAuthRegisterController
 
             $editor->createNewUser($user, $email_obj, $allow_reassign_email);
             if ($must_set_password) {
-              $envelope = new PhutilOpaqueEnvelope($value_password);
-              $editor->changePassword($user, $envelope);
+              $password_object = PhabricatorAuthPassword::initializeNewPassword(
+                $user,
+                $account_type);
+
+              $password_object
+                ->setPassword($password_envelope, $user)
+                ->save();
             }
 
             if ($is_setup) {
-              $editor->makeAdminUser($user, true);
+              $xactions = array();
+              $xactions[] = id(new PhabricatorUserTransaction())
+                ->setTransactionType(
+                  PhabricatorUserEmpowerTransaction::TRANSACTIONTYPE)
+                ->setNewValue(true);
+
+              $actor = PhabricatorUser::getOmnipotentUser();
+              $content_source = PhabricatorContentSource::newFromRequest(
+                $request);
+
+              $people_application_phid = id(new PhabricatorPeopleApplication())
+                ->getPHID();
+
+              $transaction_editor = id(new PhabricatorUserTransactionEditor())
+                ->setActor($actor)
+                ->setActingAsPHID($people_application_phid)
+                ->setContentSource($content_source)
+                ->setContinueOnMissingFields(true);
+
+              $transaction_editor->applyTransactions($user, $xactions);
             }
 
-            $account->setUserPHID($user->getPHID());
-            $provider->willRegisterAccount($account);
-            $account->save();
+            if (!$is_setup) {
+              $account->setUserPHID($user->getPHID());
+              $account->save();
+            }
 
           $user->saveTransaction();
 
@@ -478,7 +519,6 @@ final class PhabricatorAuthRegisterController
               ->setExternalAccount($account)
               ->setAuthProvider($provider)));
     }
-
 
     if ($can_edit_username) {
       $form->appendChild(
@@ -556,7 +596,9 @@ final class PhabricatorAuthRegisterController
 
     if ($is_setup) {
       $crumbs->addTextCrumb(pht('Setup Admin Account'));
-        $title = pht('Welcome to Phabricator');
+        $title = pht(
+          'Welcome to %s',
+          PlatformSymbols::getPlatformServerName());
     } else {
       $crumbs->addTextCrumb(pht('Register'));
       $crumbs->addTextCrumb($provider->getProviderName());
@@ -568,12 +610,15 @@ final class PhabricatorAuthRegisterController
     if ($is_setup) {
       $welcome_view = id(new PHUIInfoView())
         ->setSeverity(PHUIInfoView::SEVERITY_NOTICE)
-        ->setTitle(pht('Welcome to Phabricator'))
+        ->setTitle(
+          pht(
+            'Welcome to %s',
+            PlatformSymbols::getPlatformServerName()))
         ->appendChild(
           pht(
             'Installation is complete. Register your administrator account '.
             'below to log in. You will be able to configure options and add '.
-            'other authentication mechanisms (like LDAP or OAuth) later on.'));
+            'authentication mechanisms later on.'));
     }
 
     $object_box = id(new PHUIObjectBoxView())
@@ -590,11 +635,12 @@ final class PhabricatorAuthRegisterController
 
     $view = id(new PHUITwoColumnView())
       ->setHeader($header)
-      ->setFooter(array(
-      $welcome_view,
-      $invite_header,
-      $object_box,
-    ));
+      ->setFooter(
+        array(
+          $welcome_view,
+          $invite_header,
+          $object_box,
+        ));
 
     return $this->newPage()
       ->setTitle($title)
@@ -602,17 +648,20 @@ final class PhabricatorAuthRegisterController
       ->appendChild($view);
   }
 
-  private function loadDefaultAccount() {
+  private function loadDefaultAccount($invite) {
     $providers = PhabricatorAuthProvider::getAllEnabledProviders();
     $account = null;
     $provider = null;
     $response = null;
 
     foreach ($providers as $key => $candidate_provider) {
-      if (!$candidate_provider->shouldAllowRegistration()) {
-        unset($providers[$key]);
-        continue;
+      if (!$invite) {
+        if (!$candidate_provider->shouldAllowRegistration()) {
+          unset($providers[$key]);
+          continue;
+        }
       }
+
       if (!$candidate_provider->isDefaultRegistrationProvider()) {
         unset($providers[$key]);
       }
@@ -630,21 +679,8 @@ final class PhabricatorAuthRegisterController
     }
 
     $provider = head($providers);
-    $account = $provider->getDefaultExternalAccount();
+    $account = $provider->newDefaultExternalAccount();
 
-    return array($account, $provider, $response);
-  }
-
-  private function loadSetupAccount() {
-    $provider = new PhabricatorPasswordAuthProvider();
-    $provider->attachProviderConfig(
-      id(new PhabricatorAuthProviderConfig())
-        ->setShouldAllowRegistration(1)
-        ->setShouldAllowLogin(1)
-        ->setIsEnabled(true));
-
-    $account = $provider->getDefaultExternalAccount();
-    $response = null;
     return array($account, $provider, $response);
   }
 
@@ -680,8 +716,9 @@ final class PhabricatorAuthRegisterController
   }
 
   private function sendWaitingForApprovalEmail(PhabricatorUser $user) {
-    $title = '[Phabricator] '.pht(
-      'New User "%s" Awaiting Approval',
+    $title = pht(
+      '[%s] New User "%s" Awaiting Approval',
+      PlatformSymbols::getPlatformServerName(),
       $user->getUsername());
 
     $body = new PhabricatorMetaMTAMailBody();

@@ -14,19 +14,35 @@ final class PhabricatorSystemApplication extends PhabricatorApplication {
     return true;
   }
 
+  public function getEventListeners() {
+    return array(
+      new PhabricatorSystemDebugUIEventListener(),
+    );
+  }
+
   public function getRoutes() {
     return array(
       '/status/' => 'PhabricatorStatusController',
       '/debug/' => 'PhabricatorDebugController',
-      '/robots.txt' => 'PhabricatorRobotsController',
+      '/favicon.ico' => 'PhabricatorFaviconController',
+      '/robots.txt' => 'PhabricatorRobotsPlatformController',
       '/services/' => array(
         'encoding/' => 'PhabricatorSystemSelectEncodingController',
         'highlight/' => 'PhabricatorSystemSelectHighlightController',
+        'viewas/' => 'PhabricatorSystemSelectViewAsController',
       ),
       '/readonly/' => array(
         '(?P<reason>[^/]+)/' => 'PhabricatorSystemReadOnlyController',
       ),
-      '/favicon.ico' => 'PhabricatorSystemFaviconController',
+      '/object/(?P<name>[^/]+)/' => 'PhabricatorSystemObjectController',
+    );
+  }
+
+  public function getResourceRoutes() {
+    return array(
+      '/status/' => 'PhabricatorStatusController',
+      '/favicon.ico' => 'PhabricatorFaviconController',
+      '/robots.txt' => 'PhabricatorRobotsResourceController',
     );
   }
 

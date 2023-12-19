@@ -3,6 +3,14 @@
 final class DifferentialInlineCommentEditController
   extends PhabricatorInlineCommentController {
 
+  protected function newInlineCommentQuery() {
+    return new DifferentialDiffInlineCommentQuery();
+  }
+
+  protected function newContainerObject() {
+    return $this->loadRevision();
+  }
+
   private function getRevisionID() {
     return $this->getRequest()->getURIData('id');
   }
@@ -58,40 +66,10 @@ final class DifferentialInlineCommentEditController
       ->setChangesetID($changeset_id);
   }
 
-  protected function loadComment($id) {
-    return id(new DifferentialInlineCommentQuery())
-      ->setViewer($this->getViewer())
-      ->withIDs(array($id))
-      ->withDeletedDrafts(true)
-      ->needHidden(true)
-      ->executeOne();
-  }
-
-  protected function loadCommentByPHID($phid) {
-    return id(new DifferentialInlineCommentQuery())
-      ->setViewer($this->getViewer())
-      ->withPHIDs(array($phid))
-      ->withDeletedDrafts(true)
-      ->needHidden(true)
-      ->executeOne();
-  }
-
-  protected function loadCommentForEdit($id) {
-    $request = $this->getRequest();
-    $user = $request->getUser();
-
-    $inline = $this->loadComment($id);
-    if (!$this->canEditInlineComment($user, $inline)) {
-      throw new Exception(pht('That comment is not editable!'));
-    }
-    return $inline;
-  }
-
   protected function loadCommentForDone($id) {
-    $request = $this->getRequest();
-    $viewer = $request->getUser();
+    $viewer = $this->getViewer();
 
-    $inline = $this->loadComment($id);
+    $inline = $this->loadCommentByID($id);
     if (!$inline) {
       throw new Exception(pht('Unable to load inline "%d".', $id));
     }
@@ -120,19 +98,32 @@ final class DifferentialInlineCommentEditController
       throw new Exception(pht('Unable to load revision.'));
     }
 
-    if ($revision->getAuthorPHID() !== $viewer->getPHID()) {
-      throw new Exception(pht('You are not the revision owner.'));
+    $viewer_phid = $viewer->getPHID();
+    $is_owner = ($viewer_phid == $revision->getAuthorPHID());
+    $is_author = ($viewer_phid == $inline->getAuthorPHID());
+    $is_draft = ($inline->isDraft());
+
+    if ($is_owner) {
+      // You own the revision, so you can mark the comment as "Done".
+    } else if ($is_author && $is_draft) {
+      // You made this comment and it's still a draft, so you can mark
+      // it as "Done".
+    } else {
+      throw new Exception(
+        pht(
+          'You are not the revision owner, and this is not a draft comment '.
+          'you authored.'));
     }
 
     return $inline;
   }
 
-  private function canEditInlineComment(
-    PhabricatorUser $user,
+  protected function canEditInlineComment(
+    PhabricatorUser $viewer,
     DifferentialInlineComment $inline) {
 
     // Only the author may edit a comment.
-    if ($inline->getAuthorPHID() != $user->getPHID()) {
+    if ($inline->getAuthorPHID() != $viewer->getPHID()) {
       return false;
     }
 
@@ -150,30 +141,8 @@ final class DifferentialInlineCommentEditController
     return true;
   }
 
-  protected function deleteComment(PhabricatorInlineCommentInterface $inline) {
-    $inline->openTransaction();
-      $inline->setIsDeleted(1)->save();
-      $this->syncDraft();
-    $inline->saveTransaction();
-  }
-
-  protected function undeleteComment(
-    PhabricatorInlineCommentInterface $inline) {
-    $inline->openTransaction();
-      $inline->setIsDeleted(0)->save();
-      $this->syncDraft();
-    $inline->saveTransaction();
-  }
-
-  protected function saveComment(PhabricatorInlineCommentInterface $inline) {
-    $inline->openTransaction();
-      $inline->save();
-      $this->syncDraft();
-    $inline->saveTransaction();
-  }
-
   protected function loadObjectOwnerPHID(
-    PhabricatorInlineCommentInterface $inline) {
+    PhabricatorInlineComment $inline) {
     return $this->loadRevision()->getAuthorPHID();
   }
 
@@ -193,9 +162,9 @@ final class DifferentialInlineCommentEditController
 
     queryfx(
       $conn_w,
-      'INSERT IGNORE INTO %T (userPHID, commentID) VALUES %Q',
+      'INSERT IGNORE INTO %T (userPHID, commentID) VALUES %LQ',
       $table->getTableName(),
-      implode(', ', $sql));
+      $sql);
   }
 
   protected function showComments(array $ids) {
@@ -209,16 +178,6 @@ final class DifferentialInlineCommentEditController
       $table->getTableName(),
       $viewer->getPHID(),
       $ids);
-  }
-
-  private function syncDraft() {
-    $viewer = $this->getViewer();
-    $revision = $this->loadRevision();
-
-    $revision->newDraftEngine()
-      ->setObject($revision)
-      ->setViewer($viewer)
-      ->synchronize();
   }
 
 }

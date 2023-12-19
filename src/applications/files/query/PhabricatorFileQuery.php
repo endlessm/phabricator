@@ -19,6 +19,8 @@ final class PhabricatorFileQuery
   private $needTransforms;
   private $builtinKeys;
   private $isBuiltin;
+  private $storageEngines;
+  private $attachedObjectPHIDs;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -57,6 +59,11 @@ final class PhabricatorFileQuery
 
   public function withIsBuiltin($is_builtin) {
     $this->isBuiltin = $is_builtin;
+    return $this;
+  }
+
+  public function withAttachedObjectPHIDs(array $phids) {
+    $this->attachedObjectPHIDs = $phids;
     return $this;
   }
 
@@ -137,6 +144,11 @@ final class PhabricatorFileQuery
       $ngrams);
   }
 
+  public function withStorageEngines(array $engines) {
+    $this->storageEngines = $engines;
+    return $this;
+  }
+
   public function showOnlyExplicitUploads($explicit_uploads) {
     $this->explicitUploads = $explicit_uploads;
     return $this;
@@ -152,61 +164,92 @@ final class PhabricatorFileQuery
   }
 
   protected function loadPage() {
-    $files = $this->loadStandardPage(new PhabricatorFile());
+    $files = $this->loadStandardPage($this->newResultObject());
 
     if (!$files) {
       return $files;
     }
 
+    // Figure out which files we need to load attached objects for. In most
+    // cases, we need to load attached objects to perform policy checks for
+    // files.
+
+    // However, in some special cases where we know files will always be
+    // visible, we skip this. See T8478 and T13106.
+    $need_objects = array();
+    $need_xforms = array();
+    foreach ($files as $file) {
+      $always_visible = false;
+
+      if ($file->getIsProfileImage()) {
+        $always_visible = true;
+      }
+
+      if ($file->isBuiltin()) {
+        $always_visible = true;
+      }
+
+      if ($always_visible) {
+        // We just treat these files as though they aren't attached to
+        // anything. This saves a query in common cases when we're loading
+        // profile images or builtins. We could be slightly more nuanced
+        // about this and distinguish between "not attached to anything" and
+        // "might be attached but policy checks don't need to care".
+        $file->attachObjectPHIDs(array());
+        continue;
+      }
+
+      $need_objects[] = $file;
+      $need_xforms[] = $file;
+    }
+
     $viewer = $this->getViewer();
     $is_omnipotent = $viewer->isOmnipotent();
 
-    // We need to load attached objects to perform policy checks for files.
-    // First, load the edges.
-
-    $edge_type = PhabricatorFileHasObjectEdgeType::EDGECONST;
-    $file_phids = mpull($files, 'getPHID');
-    $edges = id(new PhabricatorEdgeQuery())
-      ->withSourcePHIDs($file_phids)
-      ->withEdgeTypes(array($edge_type))
-      ->execute();
-
+    // If we have any files left which do need objects, load the edges now.
     $object_phids = array();
-    foreach ($files as $file) {
-      $phids = array_keys($edges[$file->getPHID()][$edge_type]);
-      $file->attachObjectPHIDs($phids);
+    if ($need_objects) {
+      $attachments_map = $this->newAttachmentsMap($need_objects);
 
-      if ($file->getIsProfileImage()) {
-        // If this is a profile image, don't bother loading related files.
-        // It will always be visible, and we can get into trouble if we try
-        // to load objects and end up stuck in a cycle. See T8478.
-        continue;
-      }
+      foreach ($need_objects as $file) {
+        $file_phid = $file->getPHID();
+        $phids = $attachments_map[$file_phid];
 
-      if ($is_omnipotent) {
-        // If the viewer is omnipotent, we don't need to load the associated
-        // objects either since they can certainly see the object. Skipping
-        // this can improve performance and prevent cycles.
-        continue;
-      }
+        $file->attachObjectPHIDs($phids);
 
-      foreach ($phids as $phid) {
-        $object_phids[$phid] = true;
+        if ($is_omnipotent) {
+          // If the viewer is omnipotent, we don't need to load the associated
+          // objects either since the viewer can certainly see the object.
+          // Skipping this can improve performance and prevent cycles. This
+          // could possibly become part of the profile/builtin code above which
+          // short circuits attacment policy checks in cases where we know them
+          // to be unnecessary.
+          continue;
+        }
+
+        foreach ($phids as $phid) {
+          $object_phids[$phid] = true;
+        }
       }
     }
 
     // If this file is a transform of another file, load that file too. If you
     // can see the original file, you can see the thumbnail.
 
-    // TODO: It might be nice to put this directly on PhabricatorFile and remove
-    // the PhabricatorTransformedFile table, which would be a little simpler.
+    // TODO: It might be nice to put this directly on PhabricatorFile and
+    // remove the PhabricatorTransformedFile table, which would be a little
+    // simpler.
 
-    $xforms = id(new PhabricatorTransformedFile())->loadAllWhere(
-      'transformedPHID IN (%Ls)',
-      $file_phids);
-    $xform_phids = mpull($xforms, 'getOriginalPHID', 'getTransformedPHID');
-    foreach ($xform_phids as $derived_phid => $original_phid) {
-      $object_phids[$original_phid] = true;
+    if ($need_xforms) {
+      $xforms = id(new PhabricatorTransformedFile())->loadAllWhere(
+        'transformedPHID IN (%Ls)',
+        mpull($need_xforms, 'getPHID'));
+      $xform_phids = mpull($xforms, 'getOriginalPHID', 'getTransformedPHID');
+      foreach ($xform_phids as $derived_phid => $original_phid) {
+        $object_phids[$original_phid] = true;
+      }
+    } else {
+      $xform_phids = array();
     }
 
     $object_phids = array_keys($object_phids);
@@ -258,6 +301,32 @@ final class PhabricatorFileQuery
     return $files;
   }
 
+  private function newAttachmentsMap(array $files) {
+    $file_phids = mpull($files, 'getPHID');
+
+    $attachments_table = new PhabricatorFileAttachment();
+    $attachments_conn = $attachments_table->establishConnection('r');
+
+    $attachments = queryfx_all(
+      $attachments_conn,
+      'SELECT filePHID, objectPHID FROM %R WHERE filePHID IN (%Ls)
+        AND attachmentMode IN (%Ls)',
+      $attachments_table,
+      $file_phids,
+      array(
+        PhabricatorFileAttachment::MODE_ATTACH,
+      ));
+
+    $attachments_map = array_fill_keys($file_phids, array());
+    foreach ($attachments as $row) {
+      $file_phid = $row['filePHID'];
+      $object_phid = $row['objectPHID'];
+      $attachments_map[$file_phid][] = $object_phid;
+    }
+
+    return $attachments_map;
+  }
+
   protected function didFilterPage(array $files) {
     $xform_keys = $this->needTransforms;
     if ($xform_keys !== null) {
@@ -306,7 +375,22 @@ final class PhabricatorFileQuery
         id(new PhabricatorTransformedFile())->getTableName());
     }
 
+    if ($this->shouldJoinAttachmentsTable()) {
+      $joins[] = qsprintf(
+        $conn,
+        'JOIN %R attachments ON attachments.filePHID = f.phid
+          AND attachmentMode IN (%Ls)',
+        new PhabricatorFileAttachment(),
+        array(
+          PhabricatorFileAttachment::MODE_ATTACH,
+        ));
+    }
+
     return $joins;
+  }
+
+  private function shouldJoinAttachmentsTable() {
+    return ($this->attachedObjectPHIDs !== null);
   }
 
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
@@ -356,7 +440,7 @@ final class PhabricatorFileQuery
             $transform['transform']);
         }
       }
-      $where[] = qsprintf($conn, '(%Q)', implode(') OR (', $clauses));
+      $where[] = qsprintf($conn, '%LO', $clauses);
     }
 
     if ($this->dateCreatedAfter !== null) {
@@ -432,6 +516,20 @@ final class PhabricatorFileQuery
           $conn,
           'builtinKey IS NULL');
       }
+    }
+
+    if ($this->storageEngines !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'storageEngine IN (%Ls)',
+        $this->storageEngines);
+    }
+
+    if ($this->attachedObjectPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'attachments.objectPHID IN (%Ls)',
+        $this->attachedObjectPHIDs);
     }
 
     return $where;

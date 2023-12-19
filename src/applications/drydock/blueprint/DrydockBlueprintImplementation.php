@@ -64,7 +64,7 @@ abstract class DrydockBlueprintImplementation extends Phobject {
    * is a coarse compatibility check between a lease and a resource.
    *
    * @param DrydockBlueprint Concrete blueprint to allocate for.
-   * @param DrydockResource Candidiate resource to allocate the lease on.
+   * @param DrydockResource Candidate resource to allocate the lease on.
    * @param DrydockLease Pending lease that wants to allocate here.
    * @return bool True if the resource and lease are compatible.
    * @task lease
@@ -76,7 +76,7 @@ abstract class DrydockBlueprintImplementation extends Phobject {
 
 
   /**
-   * Acquire a lease. Allows resources to peform setup as leases are brought
+   * Acquire a lease. Allows resources to perform setup as leases are brought
    * online.
    *
    * If acquisition fails, throw an exception.
@@ -139,6 +139,38 @@ abstract class DrydockBlueprintImplementation extends Phobject {
     DrydockResource $resource,
     DrydockLease $lease);
 
+  /**
+   * Return true to try to allocate a new resource and expand the resource
+   * pool instead of permitting an otherwise valid acquisition on an existing
+   * resource.
+   *
+   * This allows the blueprint to provide a soft hint about when the resource
+   * pool should grow.
+   *
+   * Returning "true" in all cases generally makes sense when a blueprint
+   * controls a fixed pool of resources, like a particular number of physical
+   * hosts: you want to put all the hosts in service, so whenever it is
+   * possible to allocate a new host you want to do this.
+   *
+   * Returning "false" in all cases generally make sense when a blueprint
+   * has a flexible pool of expensive resources and you want to pack leases
+   * onto them as tightly as possible.
+   *
+   * @param DrydockBlueprint The blueprint for an existing resource being
+   *   acquired.
+   * @param DrydockResource The resource being acquired, which we may want to
+   *   build a supplemental resource for.
+   * @param DrydockLease The current lease performing acquisition.
+   * @return bool True to prefer allocating a supplemental resource.
+   *
+   * @task lease
+   */
+  public function shouldAllocateSupplementalResource(
+    DrydockBlueprint $blueprint,
+    DrydockResource $resource,
+    DrydockLease $lease) {
+    return false;
+  }
 
 /* -(  Resource Allocation  )------------------------------------------------ */
 
@@ -297,6 +329,47 @@ abstract class DrydockBlueprintImplementation extends Phobject {
       ->execute();
   }
 
+
+  /**
+   * Get all the @{class:DrydockBlueprintImplementation}s which can possibly
+   * build a resource to satisfy a lease.
+   *
+   * This method returns blueprints which might, at some time, be able to
+   * build a resource which can satisfy the lease. They may not be able to
+   * build that resource right now.
+   *
+   * @param DrydockLease Requested lease.
+   * @return list<DrydockBlueprintImplementation> List of qualifying blueprint
+   *   implementations.
+   */
+  public static function getAllForAllocatingLease(
+    DrydockLease $lease) {
+
+    $impls = self::getAllBlueprintImplementations();
+
+    $keep = array();
+    foreach ($impls as $key => $impl) {
+      // Don't use disabled blueprint types.
+      if (!$impl->isEnabled()) {
+        continue;
+      }
+
+      // Don't use blueprint types which can't allocate the correct kind of
+      // resource.
+      if ($impl->getType() != $lease->getResourceType()) {
+        continue;
+      }
+
+      if (!$impl->canAnyBlueprintEverAllocateResourceForLease($lease)) {
+        continue;
+      }
+
+      $keep[$key] = $impl;
+    }
+
+    return $keep;
+  }
+
   public static function getNamedImplementation($class) {
     return idx(self::getAllBlueprintImplementations(), $class);
   }
@@ -396,16 +469,20 @@ abstract class DrydockBlueprintImplementation extends Phobject {
     }
 
     // For reasonable limits, actually check for an available slot.
-    $locks = DrydockSlotLock::loadLocks($blueprint_phid);
-    $locks = mpull($locks, null, 'getLockKey');
-
     $slots = range(0, $limit - 1);
     shuffle($slots);
 
+    $lock_names = array();
     foreach ($slots as $slot) {
-      $slot_lock = "allocator({$blueprint_phid}).limit({$slot})";
-      if (empty($locks[$slot_lock])) {
-        return $slot_lock;
+      $lock_names[] = "allocator({$blueprint_phid}).limit({$slot})";
+    }
+
+    $locks = DrydockSlotLock::loadHeldLocks($lock_names);
+    $locks = mpull($locks, null, 'getLockKey');
+
+    foreach ($lock_names as $lock_name) {
+      if (empty($locks[$lock_name])) {
+        return $lock_name;
       }
     }
 
@@ -414,7 +491,8 @@ abstract class DrydockBlueprintImplementation extends Phobject {
     // lock will be free by the time we try to take it, but usually we'll just
     // fail to grab the lock, throw an appropriate lock exception, and get back
     // on the right path to retry later.
-    return $slot_lock;
+
+    return $lock_name;
   }
 
 
@@ -428,28 +506,21 @@ abstract class DrydockBlueprintImplementation extends Phobject {
   protected function shouldLimitAllocatingPoolSize(
     DrydockBlueprint $blueprint) {
 
-    // TODO: If this mechanism sticks around, these values should be
-    // configurable by the blueprint implementation.
-
     // Limit on total number of active resources.
     $total_limit = $this->getConcurrentResourceLimit($blueprint);
-
-    // Always allow at least this many allocations to be in flight at once.
-    $min_allowed = 1;
-
-    // Allow this fraction of allocating resources as a fraction of active
-    // resources.
-    $growth_factor = 0.25;
+    if ($total_limit === null) {
+      return false;
+    }
 
     $resource = new DrydockResource();
-    $conn_r = $resource->establishConnection('r');
+    $conn = $resource->establishConnection('r');
 
     $counts = queryfx_all(
-      $conn_r,
-      'SELECT status, COUNT(*) N FROM %T
+      $conn,
+      'SELECT status, COUNT(*) N FROM %R
         WHERE blueprintPHID = %s AND status != %s
         GROUP BY status',
-      $resource->getTableName(),
+      $resource,
       $blueprint->getPHID(),
       DrydockResourceStatus::STATUS_DESTROYED);
     $counts = ipull($counts, 'N', 'status');
@@ -461,29 +532,12 @@ abstract class DrydockBlueprintImplementation extends Phobject {
 
     // If we're at the limit on total active resources, limit additional
     // allocations.
-    if ($total_limit !== null) {
-      $n_total = ($n_alloc + $n_active + $n_broken + $n_released);
-      if ($n_total >= $total_limit) {
-        return true;
-      }
+    $n_total = ($n_alloc + $n_active + $n_broken + $n_released);
+    if ($n_total >= $total_limit) {
+      return true;
     }
 
-    // If the number of in-flight allocations is fewer than the minimum number
-    // of allowed allocations, don't impose a limit.
-    if ($n_alloc < $min_allowed) {
-      return false;
-    }
-
-    $allowed_alloc = (int)ceil($n_active * $growth_factor);
-
-    // If the number of in-flight allocation is fewer than the number of
-    // allowed allocations according to the pool growth factor, don't impose
-    // a limit.
-    if ($n_alloc < $allowed_alloc) {
-      return false;
-    }
-
-    return true;
+    return false;
   }
 
 }

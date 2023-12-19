@@ -10,6 +10,7 @@ final class PhabricatorOwnersPackageQuery
   private $repositoryPHIDs;
   private $paths;
   private $statuses;
+  private $authorityModes;
 
   private $controlMap = array();
   private $controlResults;
@@ -77,6 +78,11 @@ final class PhabricatorOwnersPackageQuery
     return $this;
   }
 
+  public function withAuthorityModes(array $modes) {
+    $this->authorityModes = $modes;
+    return $this;
+  }
+
   public function withNameNgrams($ngrams) {
     return $this->withNgramsConstraint(
       new PhabricatorOwnersPackageNameNgrams(),
@@ -94,10 +100,6 @@ final class PhabricatorOwnersPackageQuery
 
   protected function willExecute() {
     $this->controlResults = array();
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function willFilterPage(array $packages) {
@@ -206,8 +208,8 @@ final class PhabricatorOwnersPackageQuery
     if ($this->paths !== null) {
       $where[] = qsprintf(
         $conn,
-        'rpath.path IN (%Ls)',
-        $this->getFragmentsForPaths($this->paths));
+        'rpath.pathIndex IN (%Ls)',
+        $this->getFragmentIndexesForPaths($this->paths));
     }
 
     if ($this->statuses !== null) {
@@ -220,15 +222,22 @@ final class PhabricatorOwnersPackageQuery
     if ($this->controlMap) {
       $clauses = array();
       foreach ($this->controlMap as $repository_phid => $paths) {
-        $fragments = $this->getFragmentsForPaths($paths);
+        $indexes = $this->getFragmentIndexesForPaths($paths);
 
         $clauses[] = qsprintf(
           $conn,
-          '(rpath.repositoryPHID = %s AND rpath.path IN (%Ls))',
+          '(rpath.repositoryPHID = %s AND rpath.pathIndex IN (%Ls))',
           $repository_phid,
-          $fragments);
+          $indexes);
       }
-      $where[] = implode(' OR ', $clauses);
+      $where[] = qsprintf($conn, '%LO', $clauses);
+    }
+
+    if ($this->authorityModes !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'authorityMode IN (%Ls)',
+        $this->authorityModes);
     }
 
     return $where;
@@ -267,11 +276,10 @@ final class PhabricatorOwnersPackageQuery
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $package = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      'id' => $package->getID(),
-      'name' => $package->getName(),
+      'id' => (int)$object->getID(),
+      'name' => $object->getName(),
     );
   }
 
@@ -331,6 +339,16 @@ final class PhabricatorOwnersPackageQuery
     }
 
     return $fragments;
+  }
+
+  private function getFragmentIndexesForPaths(array $paths) {
+    $indexes = array();
+
+    foreach ($this->getFragmentsForPaths($paths) as $fragment) {
+      $indexes[] = PhabricatorHash::digestForIndex($fragment);
+    }
+
+    return $indexes;
   }
 
 

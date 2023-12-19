@@ -6,8 +6,9 @@ final class PhabricatorAuthEditController
   public function handleRequest(AphrontRequest $request) {
     $this->requireApplicationCapability(
       AuthManageProvidersCapability::CAPABILITY);
-    $viewer = $request->getUser();
-    $provider_class = $request->getURIData('className');
+
+    $viewer = $this->getViewer();
+    $provider_class = $request->getStr('provider');
     $config_id = $request->getURIData('id');
 
     if ($config_id) {
@@ -78,6 +79,7 @@ final class PhabricatorAuthEditController
     }
 
     $errors = array();
+    $validation_exception = null;
 
     $v_login = $config->getShouldAllowLogin();
     $v_registration = $config->getShouldAllowRegistration();
@@ -152,17 +154,16 @@ final class PhabricatorAuthEditController
         $editor = id(new PhabricatorAuthProviderConfigEditor())
           ->setActor($viewer)
           ->setContentSourceFromRequest($request)
-          ->setContinueOnNoEffect(true)
-          ->applyTransactions($config, $xactions);
+          ->setContinueOnNoEffect(true);
 
-        if ($provider->hasSetupStep() && $is_new) {
-          $id = $config->getID();
-          $next_uri = $this->getApplicationURI('config/edit/'.$id.'/');
-        } else {
-          $next_uri = $this->getApplicationURI();
+        try {
+          $editor->applyTransactions($config, $xactions);
+          $next_uri = $config->getURI();
+
+          return id(new AphrontRedirectResponse())->setURI($next_uri);
+        } catch (Exception $ex) {
+          $validation_exception = $ex;
         }
-
-        return id(new AphrontRedirectResponse())->setURI($next_uri);
       }
     } else {
       $properties = $provider->readFormValuesFromProvider();
@@ -184,7 +185,7 @@ final class PhabricatorAuthEditController
       $crumb = pht('Edit Provider');
       $title = pht('Edit Auth Provider');
       $header_icon = 'fa-pencil';
-      $cancel_uri = $this->getApplicationURI();
+      $cancel_uri = $config->getURI();
     }
 
     $header = id(new PHUIHeaderView())
@@ -219,7 +220,7 @@ final class PhabricatorAuthEditController
     } else {
       $registration_warning = pht(
         "NOTE: Any user who can browse to this install's login page will be ".
-        "able to register a Phabricator account. To restrict who can register ".
+        "able to register an account. To restrict who can register ".
         "an account, configure [[ %s | %s ]].",
         $config_href,
         $config_name);
@@ -237,10 +238,9 @@ final class PhabricatorAuthEditController
       phutil_tag('strong', array(), pht('Allow Registration:')),
       ' ',
       pht(
-        'Allow users to register new Phabricator accounts using this '.
-        'provider. If you disable registration, users can still use this '.
-        'provider to log in to existing accounts, but will not be able to '.
-        'create new accounts.'),
+        'Allow users to register new accounts using this provider. If you '.
+        'disable registration, users can still use this provider to log in '.
+        'to existing accounts, but will not be able to create new accounts.'),
     );
 
     $str_link = hsprintf(
@@ -248,33 +248,34 @@ final class PhabricatorAuthEditController
       pht('Allow Linking Accounts'),
       pht(
         'Allow users to link account credentials for this provider to '.
-        'existing Phabricator accounts. There is normally no reason to '.
-        'disable this unless you are trying to move away from a provider '.
-        'and want to stop users from creating new account links.'));
+        'existing accounts. There is normally no reason to disable this '.
+        'unless you are trying to move away from a provider and want to '.
+        'stop users from creating new account links.'));
 
     $str_unlink = hsprintf(
       '<strong>%s:</strong> %s',
       pht('Allow Unlinking Accounts'),
       pht(
         'Allow users to unlink account credentials for this provider from '.
-        'existing Phabricator accounts. If you disable this, Phabricator '.
-        'accounts will be permanently bound to provider accounts.'));
+        'existing accounts. If you disable this, accounts will be '.
+        'permanently bound to provider accounts.'));
 
     $str_trusted_email = hsprintf(
       '<strong>%s:</strong> %s',
       pht('Trust Email Addresses'),
       pht(
-        'Phabricator will skip email verification for accounts registered '.
+        'Skip email verification for accounts registered '.
         'through this provider.'));
     $str_auto_login = hsprintf(
       '<strong>%s:</strong> %s',
       pht('Allow Auto Login'),
       pht(
-        'Phabricator will automatically login with this provider if it is '.
+        'Automatically log in with this provider if it is '.
         'the only available provider.'));
 
     $form = id(new AphrontFormView())
       ->setUser($viewer)
+      ->addHiddenInput('provider', $provider_class)
       ->appendChild(
         id(new AphrontFormCheckboxControl())
           ->setLabel(pht('Allow'))
@@ -328,11 +329,34 @@ final class PhabricatorAuthEditController
 
     $provider->extendEditForm($request, $form, $properties, $issues);
 
+    $locked_config_key = 'auth.lock-config';
+    $is_locked = PhabricatorEnv::getEnvConfig($locked_config_key);
+
+    $locked_warning = null;
+    if ($is_locked && !$validation_exception) {
+      $message = pht(
+        'Authentication provider configuration is locked, and can not be '.
+        'changed without being unlocked. See the configuration setting %s '.
+        'for details.',
+        phutil_tag(
+          'a',
+          array(
+            'href' => '/config/edit/'.$locked_config_key,
+          ),
+          $locked_config_key));
+      $locked_warning = id(new PHUIInfoView())
+        ->setViewer($viewer)
+        ->setSeverity(PHUIInfoView::SEVERITY_WARNING)
+        ->setErrors(array($message));
+    }
+
     $form
       ->appendChild(
         id(new AphrontFormSubmitControl())
           ->addCancelButton($cancel_uri)
+          ->setDisabled($is_locked)
           ->setValue($button));
+
 
     $help = $provider->getConfigurationHelp();
     if ($help) {
@@ -346,30 +370,21 @@ final class PhabricatorAuthEditController
     $crumbs->addTextCrumb($crumb);
     $crumbs->setBorder(true);
 
-    $timeline = null;
-    if (!$is_new) {
-      $timeline = $this->buildTransactionTimeline(
-        $config,
-        new PhabricatorAuthProviderConfigTransactionQuery());
-      $xactions = $timeline->getTransactions();
-      foreach ($xactions as $xaction) {
-        $xaction->setProvider($provider);
-      }
-      $timeline->setShouldTerminate(true);
-    }
-
     $form_box = id(new PHUIObjectBoxView())
       ->setHeaderText(pht('Provider'))
       ->setFormErrors($errors)
+      ->setValidationException($validation_exception)
       ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
       ->setForm($form);
+
+
 
     $view = id(new PHUITwoColumnView())
       ->setHeader($header)
       ->setFooter(array(
+        $locked_warning,
         $form_box,
         $footer,
-        $timeline,
       ));
 
     return $this->newPage()

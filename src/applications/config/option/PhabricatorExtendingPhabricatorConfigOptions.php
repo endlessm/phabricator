@@ -4,11 +4,11 @@ final class PhabricatorExtendingPhabricatorConfigOptions
   extends PhabricatorApplicationConfigOptions {
 
   public function getName() {
-    return pht('Extending Phabricator');
+    return pht('Extensions');
   }
 
   public function getDescription() {
-    return pht('Make Phabricator even cooler!');
+    return pht('Manage extensions.');
   }
 
   public function getIcon() {
@@ -36,14 +36,6 @@ final class PhabricatorExtendingPhabricatorConfigOptions
             'occur. Specify a list of classes which extend '.
             'PhabricatorEventListener here.'))
         ->addExample('MyEventListener', pht('Valid Setting')),
-       $this->newOption(
-         'aphront.default-application-configuration-class',
-         'class',
-         'AphrontDefaultApplicationConfiguration')
-        ->setLocked(true)
-        ->setBaseClass('AphrontApplicationConfiguration')
-        // TODO: This could probably use some better documentation.
-        ->setDescription(pht('Application configuration class.')),
     );
   }
 

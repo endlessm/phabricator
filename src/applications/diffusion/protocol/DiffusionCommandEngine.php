@@ -117,23 +117,36 @@ abstract class DiffusionCommandEngine extends Phobject {
     return $this->sudoAsDaemon;
   }
 
+  protected function shouldAlwaysSudo() {
+    return false;
+  }
+
   public function newFuture() {
     $argv = $this->newCommandArgv();
     $env = $this->newCommandEnvironment();
+    $is_passthru = $this->getPassthru();
 
-    if ($this->getSudoAsDaemon()) {
+    if ($this->getSudoAsDaemon() || $this->shouldAlwaysSudo()) {
       $command = call_user_func_array('csprintf', $argv);
       $command = PhabricatorDaemon::sudoCommandAsDaemonUser($command);
       $argv = array('%C', $command);
     }
 
-    if ($this->getPassthru()) {
+    if ($is_passthru) {
       $future = newv('PhutilExecPassthru', $argv);
     } else {
       $future = newv('ExecFuture', $argv);
     }
 
     $future->setEnv($env);
+
+    // See T13108. By default, don't let any cluster command run indefinitely
+    // to try to avoid cases where `git fetch` hangs for some reason and we're
+    // left sitting with a held lock forever.
+    $repository = $this->getRepository();
+    if (!$is_passthru) {
+      $future->setTimeout($repository->getEffectiveCopyTimeLimit());
+    }
 
     return $future;
   }
@@ -178,7 +191,7 @@ abstract class DiffusionCommandEngine extends Phobject {
       if (!$device) {
         throw new Exception(
           pht(
-            'Attempting to build a reposiory command (for repository "%s") '.
+            'Attempting to build a repository command (for repository "%s") '.
             'as device, but this host ("%s") is not configured as a cluster '.
             'device.',
             $repository->getDisplayName(),

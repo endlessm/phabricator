@@ -5,6 +5,7 @@ final class AlmanacNetworkQuery
 
   private $ids;
   private $phids;
+  private $names;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -20,14 +21,15 @@ final class AlmanacNetworkQuery
     return new AlmanacNetwork();
   }
 
+  public function withNames(array $names) {
+    $this->names = $names;
+    return $this;
+  }
+
   public function withNameNgrams($ngrams) {
     return $this->withNgramsConstraint(
       new AlmanacNetworkNameNgrams(),
       $ngrams);
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
@@ -45,6 +47,13 @@ final class AlmanacNetworkQuery
         $conn,
         'network.phid IN (%Ls)',
         $this->phids);
+    }
+
+    if ($this->names !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'network.name IN (%Ls)',
+        $this->names);
     }
 
     return $where;

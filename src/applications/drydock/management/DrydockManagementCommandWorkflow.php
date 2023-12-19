@@ -27,8 +27,7 @@ final class DrydockManagementCommandWorkflow
     if (!$lease_id) {
       throw new PhutilArgumentUsageException(
         pht(
-          'Use %s to specify a lease.',
-          '--lease'));
+          'Use "--lease" to specify a lease.'));
     }
 
     $argv = $args->getArg('argv');
@@ -57,8 +56,8 @@ final class DrydockManagementCommandWorkflow
       array($interface, 'execx'),
       array('%Ls', $argv));
 
-    fprintf(STDOUT, $stdout);
-    fprintf(STDERR, $stderr);
+    fwrite(STDOUT, $stdout);
+    fwrite(STDERR, $stderr);
 
     return 0;
   }

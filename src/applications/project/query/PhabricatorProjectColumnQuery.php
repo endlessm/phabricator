@@ -8,6 +8,9 @@ final class PhabricatorProjectColumnQuery
   private $projectPHIDs;
   private $proxyPHIDs;
   private $statuses;
+  private $isProxyColumn;
+  private $triggerPHIDs;
+  private $needTriggers;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -34,12 +37,23 @@ final class PhabricatorProjectColumnQuery
     return $this;
   }
 
-  public function newResultObject() {
-    return new PhabricatorProjectColumn();
+  public function withIsProxyColumn($is_proxy) {
+    $this->isProxyColumn = $is_proxy;
+    return $this;
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
+  public function withTriggerPHIDs(array $trigger_phids) {
+    $this->triggerPHIDs = $trigger_phids;
+    return $this;
+  }
+
+  public function needTriggers($need_triggers) {
+    $this->needTriggers = true;
+    return $this;
+  }
+
+  public function newResultObject() {
+    return new PhabricatorProjectColumn();
   }
 
   protected function willFilterPage(array $page) {
@@ -97,7 +111,7 @@ final class PhabricatorProjectColumnQuery
       if ($proxy_phid !== null) {
         $proxy = idx($proxies, $proxy_phid);
 
-        // Only attach valid proxies, so we don't end up getting surprsied if
+        // Only attach valid proxies, so we don't end up getting surprised if
         // an install somehow gets junk into their database.
         if (!($proxy instanceof PhabricatorColumnProxyInterface)) {
           $proxy = null;
@@ -113,6 +127,42 @@ final class PhabricatorProjectColumnQuery
       }
 
       $column->attachProxy($proxy);
+    }
+
+    if ($this->needTriggers) {
+      $trigger_phids = array();
+      foreach ($page as $column) {
+        if ($column->canHaveTrigger()) {
+          $trigger_phid = $column->getTriggerPHID();
+          if ($trigger_phid) {
+            $trigger_phids[] = $trigger_phid;
+          }
+        }
+      }
+
+      if ($trigger_phids) {
+        $triggers = id(new PhabricatorProjectTriggerQuery())
+          ->setViewer($this->getViewer())
+          ->setParentQuery($this)
+          ->withPHIDs($trigger_phids)
+          ->execute();
+        $triggers = mpull($triggers, null, 'getPHID');
+      } else {
+        $triggers = array();
+      }
+
+      foreach ($page as $column) {
+        $trigger = null;
+
+        if ($column->canHaveTrigger()) {
+          $trigger_phid = $column->getTriggerPHID();
+          if ($trigger_phid) {
+            $trigger = idx($triggers, $trigger_phid);
+          }
+        }
+
+        $column->attachTrigger($trigger);
+      }
     }
 
     return $page;
@@ -154,6 +204,21 @@ final class PhabricatorProjectColumnQuery
         $conn,
         'status IN (%Ld)',
         $this->statuses);
+    }
+
+    if ($this->triggerPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'triggerPHID IN (%Ls)',
+        $this->triggerPHIDs);
+    }
+
+    if ($this->isProxyColumn !== null) {
+      if ($this->isProxyColumn) {
+        $where[] = qsprintf($conn, 'proxyPHID IS NOT NULL');
+      } else {
+        $where[] = qsprintf($conn, 'proxyPHID IS NULL');
+      }
     }
 
     return $where;

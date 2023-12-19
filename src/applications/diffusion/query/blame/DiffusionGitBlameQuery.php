@@ -7,9 +7,13 @@ final class DiffusionGitBlameQuery extends DiffusionBlameQuery {
 
     $commit = $request->getCommit();
 
+    // NOTE: The "--root" flag suppresses the addition of the "^" boundary
+    // commit marker. Without it, root commits render with a "^" before them,
+    // and one fewer character of the commit hash.
+
     return $repository->getLocalCommandFuture(
-      '--no-pager blame -s -l %s -- %s',
-      $commit,
+      '--no-pager blame --root -s -l %s -- %s',
+      gitsprintf('%s', $commit),
       $path);
   }
 

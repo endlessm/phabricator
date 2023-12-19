@@ -37,8 +37,6 @@ final class PhabricatorAuthAccountView extends AphrontView {
       $use_name = $username;
     } else if (strlen($realname)) {
       $use_name = $realname;
-    } else {
-      $use_name = $account->getAccountID();
     }
 
     $content[] = phutil_tag(
@@ -61,8 +59,6 @@ final class PhabricatorAuthAccountView extends AphrontView {
       ),
       array(
         $prov_name,
-        " \xC2\xB7 ",
-        $account->getAccountID(),
       ));
 
     $account_uri = $account->getAccountURI();
@@ -77,6 +73,7 @@ final class PhabricatorAuthAccountView extends AphrontView {
           array(
             'href' => $account_uri,
             'target' => '_blank',
+            'rel' => 'noreferrer',
           ),
           $account_uri);
       }

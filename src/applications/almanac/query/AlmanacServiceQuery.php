@@ -12,6 +12,7 @@ final class AlmanacServiceQuery
   private $nameSuffix;
 
   private $needBindings;
+  private $needActiveBindings;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -59,12 +60,13 @@ final class AlmanacServiceQuery
     return $this;
   }
 
-  public function newResultObject() {
-    return new AlmanacService();
+  public function needActiveBindings($need_active) {
+    $this->needActiveBindings = $need_active;
+    return $this;
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
+  public function newResultObject() {
+    return new AlmanacService();
   }
 
   protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
@@ -160,18 +162,35 @@ final class AlmanacServiceQuery
   }
 
   protected function didFilterPage(array $services) {
-    if ($this->needBindings) {
+    $need_all = $this->needBindings;
+    $need_active = $this->needActiveBindings;
+
+    $need_any = ($need_all || $need_active);
+    $only_active = ($need_active && !$need_all);
+
+    if ($need_any) {
       $service_phids = mpull($services, 'getPHID');
-      $bindings = id(new AlmanacBindingQuery())
+
+      $bindings_query = id(new AlmanacBindingQuery())
         ->setViewer($this->getViewer())
         ->withServicePHIDs($service_phids)
-        ->needProperties($this->getNeedProperties())
-        ->execute();
+        ->needProperties($this->getNeedProperties());
+
+      if ($only_active) {
+        $bindings_query->withIsActive(true);
+      }
+
+      $bindings = $bindings_query->execute();
       $bindings = mgroup($bindings, 'getServicePHID');
 
       foreach ($services as $service) {
         $service_bindings = idx($bindings, $service->getPHID(), array());
-        $service->attachBindings($service_bindings);
+
+        if ($only_active) {
+          $service->attachActiveBindings($service_bindings);
+        } else {
+          $service->attachBindings($service_bindings);
+        }
       }
     }
 
@@ -206,11 +225,10 @@ final class AlmanacServiceQuery
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $service = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      'id' => $service->getID(),
-      'name' => $service->getName(),
+      'id' => (int)$object->getID(),
+      'name' => $object->getName(),
     );
   }
 

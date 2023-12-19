@@ -38,11 +38,6 @@ final class PhabricatorDiffusionConfigOptions
 
     return array(
       $this->newOption(
-        'metamta.diffusion.subject-prefix',
-        'string',
-        '[Diffusion]')
-        ->setDescription(pht('Subject prefix for Diffusion mail.')),
-      $this->newOption(
         'metamta.diffusion.attach-patches',
         'bool',
         false)
@@ -66,16 +61,22 @@ final class PhabricatorDiffusionConfigOptions
         ->setDescription(pht('Hard byte limit on including patches in email.')),
       $this->newOption('metamta.diffusion.time-limit', 'int', 60)
         ->setDescription(pht('Hard time limit on generating patches.')),
+
       $this->newOption(
         'audit.can-author-close-audit',
         'bool',
         false)
         ->setBoolOptions(
           array(
-            pht('Enable Closing Audits'),
-            pht('Disable Closing Audits'),
+            pht('Enable Self-Accept'),
+            pht('Disable Self-Accept'),
           ))
-        ->setDescription(pht('Controls whether Author can Close Audits.')),
+        ->setDescription(
+          pht(
+            'Allows the author of a commit to be an auditor and accept their '.
+            'own commits. Note that this behavior is different from the '.
+            'behavior implied by the name of the option: long ago, it did '.
+            'something else.')),
 
       $this->newOption('bugtraq.url', 'string', null)
         ->addExample('https://bugs.php.net/%BUGID%', pht('PHP bugs'))
@@ -101,20 +102,33 @@ final class PhabricatorDiffusionConfigOptions
         ->setBoolOptions(
           array(
             pht('Allow HTTP Basic Auth'),
-            pht('Disable HTTP Basic Auth'),
+            pht('Disallow HTTP Basic Auth'),
           ))
         ->setSummary(pht('Enable HTTP Basic Auth for repositories.'))
         ->setDescription(
           pht(
-            "Phabricator can serve repositories over HTTP, using HTTP basic ".
+            "This server can serve repositories over HTTP, using HTTP basic ".
             "auth.\n\n".
             "Because HTTP basic auth is less secure than SSH auth, it is ".
             "disabled by default. You can enable it here if you'd like to use ".
             "it anyway. There's nothing fundamentally insecure about it as ".
-            "long as Phabricator uses HTTPS, but it presents a much lower ".
+            "long as this server uses HTTPS, but it presents a much lower ".
             "barrier to attackers than SSH does.\n\n".
             "Consider using SSH for authenticated access to repositories ".
             "instead of HTTP.")),
+      $this->newOption('diffusion.allow-git-lfs', 'bool', false)
+        ->setBoolOptions(
+          array(
+            pht('Allow Git LFS'),
+            pht('Disallow Git LFS'),
+          ))
+        ->setLocked(true)
+        ->setSummary(pht('Allow Git Large File Storage (LFS).'))
+        ->setDescription(
+          pht(
+            'This server supports Git LFS, a Git extension for storing large '.
+            'files alongside a repository. Activate this setting to allow '.
+            'the extension to store file data.')),
       $this->newOption('diffusion.ssh-user', 'string', null)
         ->setLocked(true)
         ->setSummary(pht('Login username for SSH connections to repositories.'))
@@ -136,10 +150,9 @@ final class PhabricatorDiffusionConfigOptions
         ->setSummary(pht('Host for SSH connections to repositories.'))
         ->setDescription(
           pht(
-            'If you accept Phabricator SSH traffic on a different host '.
-            'from web traffic (for example, if you use different SSH and '.
-            'web load balancers), you can set the SSH hostname here. This '.
-            'is an advanced option.')),
+            'If you accept SSH traffic on a different host from web traffic '.
+            '(for example, if you use different SSH and web load balancers), '.
+            'you can set the SSH hostname here. This is an advanced option.')),
       $this->newOption('diffusion.fields', $custom_field_type, $default_fields)
         ->setCustomData(
           id(new PhabricatorRepositoryCommit())

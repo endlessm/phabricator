@@ -14,34 +14,34 @@ final class PhabricatorOwnersPackageTestCase extends PhabricatorTestCase {
         'id' => 1,
         'excluded' => 1,
         'dominion' => PhabricatorOwnersPackage::DOMINION_STRONG,
-        'path' => 'src/releeph/',
+        'path' => 'src/example/',
       ),
       array(
         'id' => 2,
         'excluded' => 0,
         'dominion' => PhabricatorOwnersPackage::DOMINION_STRONG,
-        'path' => 'src/releeph/',
+        'path' => 'src/example/',
       ),
     );
 
     $paths = array(
-      'src/' => array('src/a.php' => true, 'src/releeph/b.php' => true),
-      'src/releeph/' => array('src/releeph/b.php' => true),
+      'src/' => array('src/a.php' => true, 'src/example/b.php' => true),
+      'src/example/' => array('src/example/b.php' => true),
     );
     $this->assertEqual(
       array(
         1 => strlen('src/'),
-        2 => strlen('src/releeph/'),
+        2 => strlen('src/example/'),
       ),
       PhabricatorOwnersPackage::findLongestPathsPerPackage($rows, $paths));
 
     $paths = array(
-      'src/' => array('src/releeph/b.php' => true),
-      'src/releeph/' => array('src/releeph/b.php' => true),
+      'src/' => array('src/example/b.php' => true),
+      'src/example/' => array('src/example/b.php' => true),
     );
     $this->assertEqual(
       array(
-        2 => strlen('src/releeph/'),
+        2 => strlen('src/example/'),
       ),
       PhabricatorOwnersPackage::findLongestPathsPerPackage($rows, $paths));
 
@@ -82,7 +82,7 @@ final class PhabricatorOwnersPackageTestCase extends PhabricatorTestCase {
 
     // Now, add a more specific path to Package #1. This tests nested ownership
     // in packages with weak dominion rules. This time, Package #1 should end
-    // up back on top, with Package #2 cedeing control to its more specific
+    // up back on top, with Package #2 ceding control to its more specific
     // path.
     $rows[] = array(
       'id' => 1,

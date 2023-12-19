@@ -24,6 +24,7 @@ final class PhabricatorProjectQuery
   private $maxDepth;
   private $minMilestoneNumber;
   private $maxMilestoneNumber;
+  private $subtypes;
 
   private $status       = 'status-any';
   const STATUS_ANY      = 'status-any';
@@ -131,6 +132,11 @@ final class PhabricatorProjectQuery
     return $this;
   }
 
+  public function withSubtypes(array $subtypes) {
+    $this->subtypes = $subtypes;
+    return $this;
+  }
+
   public function needMembers($need_members) {
     $this->needMembers = $need_members;
     return $this;
@@ -187,14 +193,19 @@ final class PhabricatorProjectQuery
         'column' => 'milestoneNumber',
         'type' => 'int',
       ),
+      'status' => array(
+        'table' => $this->getPrimaryTableAlias(),
+        'column' => 'status',
+        'type' => 'int',
+      ),
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $project = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromPartialObject($object) {
     return array(
-      'id' => $project->getID(),
-      'name' => $project->getName(),
+      'id' => (int)$object->getID(),
+      'name' => $object->getName(),
+      'status' => $object->getStatus(),
     );
   }
 
@@ -223,10 +234,6 @@ final class PhabricatorProjectQuery
         $this->allSlugs[$slug] = $slug;
       }
     }
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function willFilterPage(array $projects) {
@@ -259,6 +266,25 @@ final class PhabricatorProjectQuery
     }
 
     $all_graph = $this->getAllReachableAncestors($projects);
+
+    // See T13484. If the graph is damaged (and contains a cycle or an edge
+    // pointing at a project which has been destroyed), some of the nodes we
+    // started with may be filtered out by reachability tests. If any of the
+    // projects we are linking up don't have available ancestors, filter them
+    // out.
+
+    foreach ($projects as $key => $project) {
+      $project_phid = $project->getPHID();
+      if (!isset($all_graph[$project_phid])) {
+        $this->didRejectResult($project);
+        unset($projects[$key]);
+        continue;
+      }
+    }
+
+    if (!$projects) {
+      return array();
+    }
 
     // NOTE: Although we may not need much information about ancestors, we
     // always need to test if the viewer is a member, because we will return
@@ -357,29 +383,69 @@ final class PhabricatorProjectQuery
   }
 
   protected function didFilterPage(array $projects) {
+    $viewer = $this->getViewer();
+
     if ($this->needImages) {
-      $file_phids = mpull($projects, 'getProfileImagePHID');
-      $file_phids = array_filter($file_phids);
+      $need_images = $projects;
+
+      // First, try to load custom profile images for any projects with custom
+      // images.
+      $file_phids = array();
+      foreach ($need_images as $key => $project) {
+        $image_phid = $project->getProfileImagePHID();
+        if ($image_phid) {
+          $file_phids[$key] = $image_phid;
+        }
+      }
+
       if ($file_phids) {
         $files = id(new PhabricatorFileQuery())
           ->setParentQuery($this)
-          ->setViewer($this->getViewer())
+          ->setViewer($viewer)
           ->withPHIDs($file_phids)
           ->execute();
         $files = mpull($files, null, 'getPHID');
-      } else {
-        $files = array();
+
+        foreach ($file_phids as $key => $image_phid) {
+          $file = idx($files, $image_phid);
+          if (!$file) {
+            continue;
+          }
+
+          $need_images[$key]->attachProfileImageFile($file);
+          unset($need_images[$key]);
+        }
       }
 
-      foreach ($projects as $project) {
-        $file = idx($files, $project->getProfileImagePHID());
-        if (!$file) {
-          $builtin = PhabricatorProjectIconSet::getIconImage(
-            $project->getIcon());
-          $file = PhabricatorFile::loadBuiltin($this->getViewer(),
-            'projects/'.$builtin);
+      // For projects with default images, or projects where the custom image
+      // failed to load, load a builtin image.
+      if ($need_images) {
+        $builtin_map = array();
+        $builtins = array();
+        foreach ($need_images as $key => $project) {
+          $icon = $project->getIcon();
+
+          $builtin_name = PhabricatorProjectIconSet::getIconImage($icon);
+          $builtin_name = 'projects/'.$builtin_name;
+
+          $builtin = id(new PhabricatorFilesOnDiskBuiltinFile())
+            ->setName($builtin_name);
+
+          $builtin_key = $builtin->getBuiltinFileKey();
+
+          $builtins[] = $builtin;
+          $builtin_map[$key] = $builtin_key;
         }
-        $project->attachProfileImageFile($file);
+
+        $builtin_files = PhabricatorFile::loadBuiltins(
+          $viewer,
+          $builtins);
+
+        foreach ($need_images as $key => $project) {
+          $builtin_key = $builtin_map[$key];
+          $builtin_file = $builtin_files[$builtin_key];
+          $project->attachProfileImageFile($builtin_file);
+        }
       }
     }
 
@@ -413,28 +479,28 @@ final class PhabricatorProjectQuery
       }
       $where[] = qsprintf(
         $conn,
-        'status IN (%Ld)',
+        'project.status IN (%Ld)',
         $filter);
     }
 
     if ($this->statuses !== null) {
       $where[] = qsprintf(
         $conn,
-        'status IN (%Ls)',
+        'project.status IN (%Ls)',
         $this->statuses);
     }
 
     if ($this->ids !== null) {
       $where[] = qsprintf(
         $conn,
-        'id IN (%Ld)',
+        'project.id IN (%Ld)',
         $this->ids);
     }
 
     if ($this->phids !== null) {
       $where[] = qsprintf(
         $conn,
-        'phid IN (%Ls)',
+        'project.phid IN (%Ls)',
         $this->phids);
     }
 
@@ -462,7 +528,7 @@ final class PhabricatorProjectQuery
     if ($this->names !== null) {
       $where[] = qsprintf(
         $conn,
-        'name IN (%Ls)',
+        'project.name IN (%Ls)',
         $this->names);
     }
 
@@ -471,30 +537,30 @@ final class PhabricatorProjectQuery
       foreach ($this->namePrefixes as $name_prefix) {
         $parts[] = qsprintf(
           $conn,
-          'name LIKE %>',
+          'project.name LIKE %>',
           $name_prefix);
       }
-      $where[] = '('.implode(' OR ', $parts).')';
+      $where[] = qsprintf($conn, '%LO', $parts);
     }
 
     if ($this->icons !== null) {
       $where[] = qsprintf(
         $conn,
-        'icon IN (%Ls)',
+        'project.icon IN (%Ls)',
         $this->icons);
     }
 
     if ($this->colors !== null) {
       $where[] = qsprintf(
         $conn,
-        'color IN (%Ls)',
+        'project.color IN (%Ls)',
         $this->colors);
     }
 
     if ($this->parentPHIDs !== null) {
       $where[] = qsprintf(
         $conn,
-        'parentProjectPHID IN (%Ls)',
+        'project.parentProjectPHID IN (%Ls)',
         $this->parentPHIDs);
     }
 
@@ -512,27 +578,27 @@ final class PhabricatorProjectQuery
       foreach ($ancestor_paths as $ancestor_path) {
         $sql[] = qsprintf(
           $conn,
-          '(projectPath LIKE %> AND projectDepth > %d)',
+          '(project.projectPath LIKE %> AND project.projectDepth > %d)',
           $ancestor_path['projectPath'],
           $ancestor_path['projectDepth']);
       }
 
-      $where[] = '('.implode(' OR ', $sql).')';
+      $where[] = qsprintf($conn, '%LO', $sql);
 
       $where[] = qsprintf(
         $conn,
-        'parentProjectPHID IS NOT NULL');
+        'project.parentProjectPHID IS NOT NULL');
     }
 
     if ($this->isMilestone !== null) {
       if ($this->isMilestone) {
         $where[] = qsprintf(
           $conn,
-          'milestoneNumber IS NOT NULL');
+          'project.milestoneNumber IS NOT NULL');
       } else {
         $where[] = qsprintf(
           $conn,
-          'milestoneNumber IS NULL');
+          'project.milestoneNumber IS NULL');
       }
     }
 
@@ -540,36 +606,43 @@ final class PhabricatorProjectQuery
     if ($this->hasSubprojects !== null) {
       $where[] = qsprintf(
         $conn,
-        'hasSubprojects = %d',
+        'project.hasSubprojects = %d',
         (int)$this->hasSubprojects);
     }
 
     if ($this->minDepth !== null) {
       $where[] = qsprintf(
         $conn,
-        'projectDepth >= %d',
+        'project.projectDepth >= %d',
         $this->minDepth);
     }
 
     if ($this->maxDepth !== null) {
       $where[] = qsprintf(
         $conn,
-        'projectDepth <= %d',
+        'project.projectDepth <= %d',
         $this->maxDepth);
     }
 
     if ($this->minMilestoneNumber !== null) {
       $where[] = qsprintf(
         $conn,
-        'milestoneNumber >= %d',
+        'project.milestoneNumber >= %d',
         $this->minMilestoneNumber);
     }
 
     if ($this->maxMilestoneNumber !== null) {
       $where[] = qsprintf(
         $conn,
-        'milestoneNumber <= %d',
+        'project.milestoneNumber <= %d',
         $this->maxMilestoneNumber);
+    }
+
+    if ($this->subtypes !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'project.subtype IN (%Ls)',
+        $this->subtypes);
     }
 
     return $where;
@@ -579,6 +652,11 @@ final class PhabricatorProjectQuery
     if ($this->memberPHIDs || $this->watcherPHIDs || $this->nameTokens) {
       return true;
     }
+
+    if ($this->slugs) {
+      return true;
+    }
+
     return parent::shouldGroupQueryResultRows();
   }
 
@@ -588,7 +666,7 @@ final class PhabricatorProjectQuery
     if ($this->memberPHIDs !== null) {
       $joins[] = qsprintf(
         $conn,
-        'JOIN %T e ON e.src = p.phid AND e.type = %d',
+        'JOIN %T e ON e.src = project.phid AND e.type = %d',
         PhabricatorEdgeConfig::TABLE_NAME_EDGE,
         PhabricatorProjectMaterializedMemberEdgeType::EDGECONST);
     }
@@ -596,7 +674,7 @@ final class PhabricatorProjectQuery
     if ($this->watcherPHIDs !== null) {
       $joins[] = qsprintf(
         $conn,
-        'JOIN %T w ON w.src = p.phid AND w.type = %d',
+        'JOIN %T w ON w.src = project.phid AND w.type = %d',
         PhabricatorEdgeConfig::TABLE_NAME_EDGE,
         PhabricatorObjectHasWatcherEdgeType::EDGECONST);
     }
@@ -604,7 +682,7 @@ final class PhabricatorProjectQuery
     if ($this->slugs !== null) {
       $joins[] = qsprintf(
         $conn,
-        'JOIN %T slug on slug.projectPHID = p.phid',
+        'JOIN %T slug on slug.projectPHID = project.phid',
         id(new PhabricatorProjectSlug())->getTableName());
     }
 
@@ -614,7 +692,7 @@ final class PhabricatorProjectQuery
         $token_table = 'token_'.$key;
         $joins[] = qsprintf(
           $conn,
-          'JOIN %T %T ON %T.projectID = p.id AND %T.token LIKE %>',
+          'JOIN %T %T ON %T.projectID = project.id AND %T.token LIKE %>',
           PhabricatorProject::TABLE_DATASOURCE_TOKEN,
           $token_table,
           $token_table,
@@ -631,7 +709,7 @@ final class PhabricatorProjectQuery
   }
 
   protected function getPrimaryTableAlias() {
-    return 'p';
+    return 'project';
   }
 
   private function linkProjectGraph(array $projects, array $ancestors) {

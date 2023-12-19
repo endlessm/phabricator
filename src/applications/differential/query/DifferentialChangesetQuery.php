@@ -4,6 +4,9 @@ final class DifferentialChangesetQuery
   extends PhabricatorCursorPagedPolicyAwareQuery {
 
   private $ids;
+  private $phids;
+  private $diffPHIDs;
+
   private $diffs;
 
   private $needAttachToDiffs;
@@ -14,9 +17,19 @@ final class DifferentialChangesetQuery
     return $this;
   }
 
+  public function withPHIDs(array $phids) {
+    $this->phids = $phids;
+    return $this;
+  }
+
   public function withDiffs(array $diffs) {
     assert_instances_of($diffs, 'DifferentialDiff');
     $this->diffs = $diffs;
+    return $this;
+  }
+
+  public function withDiffPHIDs(array $phids) {
+    $this->diffPHIDs = $phids;
     return $this;
   }
 
@@ -41,19 +54,8 @@ final class DifferentialChangesetQuery
     }
   }
 
-  protected function loadPage() {
-    $table = new DifferentialChangeset();
-    $conn_r = $table->establishConnection('r');
-
-    $data = queryfx_all(
-      $conn_r,
-      'SELECT * FROM %T %Q %Q %Q',
-      $table->getTableName(),
-      $this->buildWhereClause($conn_r),
-      $this->buildOrderClause($conn_r),
-      $this->buildLimitClause($conn_r));
-
-    return $table->loadAllFromArray($data);
+  public function newResultObject() {
+    return new DifferentialChangeset();
   }
 
   protected function willFilterPage(array $changesets) {
@@ -124,26 +126,49 @@ final class DifferentialChangesetQuery
     return $changesets;
   }
 
-  protected function buildWhereClause(AphrontDatabaseConnection $conn_r) {
-    $where = array();
+  protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
+    $where = parent::buildWhereClauseParts($conn);
 
     if ($this->diffs !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'diffID IN (%Ld)',
         mpull($this->diffs, 'getID'));
     }
 
     if ($this->ids !== null) {
       $where[] = qsprintf(
-        $conn_r,
+        $conn,
         'id IN (%Ld)',
         $this->ids);
     }
 
-    $where[] = $this->buildPagingClause($conn_r);
+    if ($this->phids !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'phid IN (%Ls)',
+        $this->phids);
+    }
 
-    return $this->formatWhereClause($where);
+    if ($this->diffPHIDs !== null) {
+      $diff_ids = queryfx_all(
+        $conn,
+        'SELECT id FROM %R WHERE phid IN (%Ls)',
+        new DifferentialDiff(),
+        $this->diffPHIDs);
+      $diff_ids = ipull($diff_ids, 'id', null);
+
+      if (!$diff_ids) {
+        throw new PhabricatorEmptyQueryException();
+      }
+
+      $where[] = qsprintf(
+        $conn,
+        'diffID IN (%Ld)',
+        $diff_ids);
+    }
+
+    return $where;
   }
 
   public function getQueryApplicationClass() {

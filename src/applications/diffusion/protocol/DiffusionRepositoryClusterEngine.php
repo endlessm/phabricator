@@ -11,6 +11,7 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
 
   private $repository;
   private $viewer;
+  private $actingAsPHID;
   private $logger;
 
   private $clusterWriteLock;
@@ -42,6 +43,23 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
   public function setLog(DiffusionRepositoryClusterEngineLogInterface $log) {
     $this->logger = $log;
     return $this;
+  }
+
+  public function setActingAsPHID($acting_as_phid) {
+    $this->actingAsPHID = $acting_as_phid;
+    return $this;
+  }
+
+  public function getActingAsPHID() {
+    return $this->actingAsPHID;
+  }
+
+  private function getEffectiveActingAsPHID() {
+    if ($this->actingAsPHID) {
+      return $this->actingAsPHID;
+    }
+
+    return $this->getViewer()->getPHID();
   }
 
 
@@ -151,8 +169,8 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
 
     $this->logLine(
       pht(
-        'Waiting up to %s second(s) for a cluster read lock on "%s"...',
-        new PhutilNumber($lock_wait),
+        'Acquiring read lock for repository "%s" on device "%s"...',
+        $repository->getDisplayName(),
         $device->getName()));
 
     try {
@@ -170,12 +188,13 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
           pht(
             'Acquired read lock immediately.'));
       }
-    } catch (Exception $ex) {
+    } catch (PhutilLockException $ex) {
       throw new PhutilProxyException(
         pht(
           'Failed to acquire read lock after waiting %s second(s). You '.
-          'may be able to retry later.',
-          new PhutilNumber($lock_wait)),
+          'may be able to retry later. (%s)',
+          new PhutilNumber($lock_wait),
+          $ex->getHint()),
         $ex);
     }
 
@@ -187,7 +206,7 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
     if ($this_version) {
       $this_version = (int)$this_version->getRepositoryVersion();
     } else {
-      $this_version = -1;
+      $this_version = null;
     }
 
     if ($versions) {
@@ -196,7 +215,7 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
       // leader, we want to fetch from a leader and then update our version.
 
       $max_version = (int)max(mpull($versions, 'getRepositoryVersion'));
-      if ($max_version > $this_version) {
+      if (($this_version === null) || ($max_version > $this_version)) {
         if ($repository->isHosted()) {
           $fetchable = array();
           foreach ($versions as $version) {
@@ -205,9 +224,13 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
             }
           }
 
-          $this->synchronizeWorkingCopyFromDevices($fetchable);
+
+          $this->synchronizeWorkingCopyFromDevices(
+            $fetchable,
+            $this_version,
+            $max_version);
         } else {
-          $this->synchornizeWorkingCopyFromRemote();
+          $this->synchronizeWorkingCopyFromRemote();
         }
 
         PhabricatorRepositoryWorkingCopyVersion::updateVersion(
@@ -231,7 +254,7 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
       // no way to tell which one has the "right" data. If we pick wrong, we
       // might erase some or all of the data in the repository.
 
-      // Since this is dangeorus, we refuse to guess unless there is only one
+      // Since this is dangerous, we refuse to guess unless there is only one
       // device. If we're the only device in the group, we obviously must be
       // a leader.
 
@@ -250,9 +273,10 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
         throw new Exception(
           pht(
             'Repository "%s" exists on more than one device, but no device '.
-            'has any repository version information. Phabricator can not '.
-            'guess which copy of the existing data is authoritative. Promote '.
-            'a device or see "Ambigous Leaders" in the documentation.',
+            'has any repository version information. There is no way for the '.
+            'software to determine which copy of the existing data is '.
+            'authoritative. Promote a device or see "Ambiguous Leaders" in '.
+            'the documentation.',
             $repository->getDisplayName()));
       }
 
@@ -306,20 +330,44 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
     $write_lock = PhabricatorRepositoryWorkingCopyVersion::getWriteLock(
       $repository_phid);
 
-    $write_lock->useSpecificConnection($locked_connection);
-
-    $lock_wait = phutil_units('2 minutes in seconds');
+    $write_lock->setExternalConnection($locked_connection);
 
     $this->logLine(
       pht(
-        'Waiting up to %s second(s) for a cluster write lock...',
-        new PhutilNumber($lock_wait)));
+        'Acquiring write lock for repository "%s"...',
+        $repository->getDisplayName()));
 
+    // See T13590. On the HTTP pathway, it's possible for us to hit the script
+    // time limit while holding the durable write lock if a user makes a big
+    // push. Remove the time limit before we acquire the durable lock.
+    set_time_limit(0);
+
+    $lock_wait = phutil_units('2 minutes in seconds');
     try {
-      $start = PhabricatorTime::getNow();
-      $write_lock->lock($lock_wait);
-      $waited = (PhabricatorTime::getNow() - $start);
+      $write_wait_start = microtime(true);
 
+      $start = PhabricatorTime::getNow();
+      $step_wait = 1;
+
+      while (true) {
+        try {
+          $write_lock->lock((int)floor($step_wait));
+          $write_wait_end = microtime(true);
+          break;
+        } catch (PhutilLockException $ex) {
+          $waited = (PhabricatorTime::getNow() - $start);
+          if ($waited > $lock_wait) {
+            throw $ex;
+          }
+          $this->logActiveWriter($viewer, $repository);
+        }
+
+        // Wait a little longer before the next message we print.
+        $step_wait = $step_wait + 0.5;
+        $step_wait = min($step_wait, 3);
+      }
+
+      $waited = (PhabricatorTime::getNow() - $start);
       if ($waited) {
         $this->logLine(
           pht(
@@ -330,12 +378,13 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
           pht(
             'Acquired write lock immediately.'));
       }
-    } catch (Exception $ex) {
+    } catch (PhutilLockException $ex) {
       throw new PhutilProxyException(
         pht(
           'Failed to acquire write lock after waiting %s second(s). You '.
-          'may be able to retry later.',
-          new PhutilNumber($lock_wait)),
+          'may be able to retry later. (%s)',
+          new PhutilNumber($lock_wait),
+          $ex->getHint()),
         $ex);
     }
 
@@ -354,12 +403,14 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
           'documentation for instructions.'));
     }
 
+    $read_wait_start = microtime(true);
     try {
       $max_version = $this->synchronizeWorkingCopyBeforeRead();
     } catch (Exception $ex) {
       $write_lock->unlock();
       throw $ex;
     }
+    $read_wait_end = microtime(true);
 
     $pid = getmypid();
     $hash = Filesystem::readRandomCharacters(12);
@@ -370,7 +421,7 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
       $repository_phid,
       $device_phid,
       array(
-        'userPHID' => $viewer->getPHID(),
+        'userPHID' => $this->getEffectiveActingAsPHID(),
         'epoch' => PhabricatorTime::getNow(),
         'devicePHID' => $device_phid,
       ),
@@ -378,6 +429,15 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
 
     $this->clusterWriteVersion = $max_version;
     $this->clusterWriteLock = $write_lock;
+
+    $write_wait = ($write_wait_end - $write_wait_start);
+    $read_wait = ($read_wait_end - $read_wait_start);
+
+    $log = $this->logger;
+    if ($log) {
+      $log->writeClusterEngineLogProperty('writeWait', $write_wait);
+      $log->writeClusterEngineLogProperty('readWait', $read_wait);
+    }
   }
 
 
@@ -391,8 +451,6 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
     if ($repository->isHosted()) {
       return;
     }
-
-    $viewer = $this->getViewer();
 
     $device = AlmanacKeys::getLiveDevice();
     $device_phid = $device->getPHID();
@@ -410,10 +468,10 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
     if ($this_version) {
       $this_version = (int)$this_version->getRepositoryVersion();
     } else {
-      $this_version = -1;
+      $this_version = null;
     }
 
-    if ($new_version > $this_version) {
+    if (($this_version === null) || ($new_version > $this_version)) {
       PhabricatorRepositoryWorkingCopyVersion::updateVersion(
         $repository_phid,
         $device_phid,
@@ -577,7 +635,7 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
   /**
    * @task internal
    */
-  private function synchornizeWorkingCopyFromRemote() {
+  private function synchronizeWorkingCopyFromRemote() {
     $repository = $this->getRepository();
     $device = AlmanacKeys::getLiveDevice();
 
@@ -621,7 +679,11 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
   /**
    * @task internal
    */
-  private function synchronizeWorkingCopyFromDevices(array $device_phids) {
+  private function synchronizeWorkingCopyFromDevices(
+    array $device_phids,
+    $local_version,
+    $remote_version) {
+
     $repository = $this->getRepository();
 
     $service = $repository->loadAlmanacService();
@@ -656,10 +718,16 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
           'fetchable.'));
     }
 
+    // If we can synchronize from multiple sources, choose one at random.
+    shuffle($fetchable);
+
     $caught = null;
     foreach ($fetchable as $binding) {
       try {
-        $this->synchronizeWorkingCopyFromBinding($binding);
+        $this->synchronizeWorkingCopyFromBinding(
+          $binding,
+          $local_version,
+          $remote_version);
         $caught = null;
         break;
       } catch (Exception $ex) {
@@ -676,14 +744,17 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
   /**
    * @task internal
    */
-  private function synchronizeWorkingCopyFromBinding($binding) {
+  private function synchronizeWorkingCopyFromBinding(
+    AlmanacBinding $binding,
+    $local_version,
+    $remote_version) {
+
     $repository = $this->getRepository();
     $device = AlmanacKeys::getLiveDevice();
 
     $this->logLine(
       pht(
-        'Synchronizing this device ("%s") from cluster leader ("%s") before '.
-        'read.',
+        'Synchronizing this device ("%s") from cluster leader ("%s").',
         $device->getName(),
         $binding->getDevice()->getName()));
 
@@ -711,17 +782,57 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
 
     $future->setCWD($local_path);
 
+    $log = PhabricatorRepositorySyncEvent::initializeNewEvent()
+      ->setRepositoryPHID($repository->getPHID())
+      ->setEpoch(PhabricatorTime::getNow())
+      ->setDevicePHID($device->getPHID())
+      ->setFromDevicePHID($binding->getDevice()->getPHID())
+      ->setDeviceVersion($local_version)
+      ->setFromDeviceVersion($remote_version);
+
+    $sync_start = microtime(true);
+
     try {
       $future->resolvex();
     } catch (Exception $ex) {
+      $log->setSyncWait(phutil_microseconds_since($sync_start));
+
+      if ($ex instanceof CommandException) {
+        if ($future->getWasKilledByTimeout()) {
+          $result_type = PhabricatorRepositorySyncEvent::RESULT_TIMEOUT;
+        } else {
+          $result_type = PhabricatorRepositorySyncEvent::RESULT_ERROR;
+        }
+
+       $log
+         ->setResultCode($ex->getError())
+         ->setResultType($result_type)
+         ->setProperty('stdout', $ex->getStdout())
+         ->setProperty('stderr', $ex->getStderr());
+      } else {
+        $log
+          ->setResultCode(1)
+          ->setResultType(PhabricatorRepositorySyncEvent::RESULT_EXCEPTION)
+          ->setProperty('message', $ex->getMessage());
+      }
+
+      $log->save();
+
       $this->logLine(
         pht(
           'Synchronization of "%s" from leader "%s" failed: %s',
           $device->getName(),
           $binding->getDevice()->getName(),
           $ex->getMessage()));
+
       throw $ex;
     }
+
+    $log
+      ->setSyncWait(phutil_microseconds_since($sync_start))
+      ->setResultCode(0)
+      ->setResultType(PhabricatorRepositorySyncEvent::RESULT_SYNC)
+      ->save();
   }
 
 
@@ -761,6 +872,71 @@ final class DiffusionRepositoryClusterEngine extends Phobject {
           $repository->getMonogram(),
           $device->getName()));
     }
+  }
+
+  private function logActiveWriter(
+    PhabricatorUser $viewer,
+    PhabricatorRepository $repository) {
+
+    $writer = PhabricatorRepositoryWorkingCopyVersion::loadWriter(
+      $repository->getPHID());
+    if (!$writer) {
+      $this->logLine(pht('Waiting on another user to finish writing...'));
+      return;
+    }
+
+    $user_phid = $writer->getWriteProperty('userPHID');
+    $device_phid = $writer->getWriteProperty('devicePHID');
+    $epoch = $writer->getWriteProperty('epoch');
+
+    $phids = array($user_phid, $device_phid);
+    $handles = $viewer->loadHandles($phids);
+
+    $duration = (PhabricatorTime::getNow() - $epoch) + 1;
+
+    $this->logLine(
+      pht(
+        'Waiting for %s to finish writing (on device "%s" for %ss)...',
+        $handles[$user_phid]->getName(),
+        $handles[$device_phid]->getName(),
+        new PhutilNumber($duration)));
+  }
+
+  public function newMaintenanceEvent() {
+    $viewer = $this->getViewer();
+    $repository = $this->getRepository();
+    $now = PhabricatorTime::getNow();
+
+    $event = PhabricatorRepositoryPushEvent::initializeNewEvent($viewer)
+      ->setRepositoryPHID($repository->getPHID())
+      ->setEpoch($now)
+      ->setPusherPHID($this->getEffectiveActingAsPHID())
+      ->setRejectCode(PhabricatorRepositoryPushLog::REJECT_ACCEPT);
+
+    return $event;
+  }
+
+  public function newMaintenanceLog() {
+    $viewer = $this->getViewer();
+    $repository = $this->getRepository();
+    $now = PhabricatorTime::getNow();
+
+    $device = AlmanacKeys::getLiveDevice();
+    if ($device) {
+      $device_phid = $device->getPHID();
+    } else {
+      $device_phid = null;
+    }
+
+    return PhabricatorRepositoryPushLog::initializeNewLog($viewer)
+      ->setDevicePHID($device_phid)
+      ->setRepositoryPHID($repository->getPHID())
+      ->attachRepository($repository)
+      ->setEpoch($now)
+      ->setPusherPHID($this->getEffectiveActingAsPHID())
+      ->setChangeFlags(PhabricatorRepositoryPushLog::CHANGEFLAG_MAINTENANCE)
+      ->setRefType(PhabricatorRepositoryPushLog::REFTYPE_MAINTENANCE)
+      ->setRefNew('');
   }
 
 }

@@ -63,48 +63,66 @@ final class DiffusionLowLevelResolveRefsQuery
     $unresolved = array_fuse($this->refs);
     $results = array();
 
-    // First, resolve branches and tags.
-    $ref_map = id(new DiffusionLowLevelGitRefQuery())
-      ->setRepository($repository)
-      ->withRefTypes(
-        array(
-          PhabricatorRepositoryRefCursor::TYPE_BRANCH,
-          PhabricatorRepositoryRefCursor::TYPE_TAG,
-        ))
-      ->execute();
-    $ref_map = mgroup($ref_map, 'getShortName');
-
-    $tag_prefix = 'refs/tags/';
+    $possible_symbols = array();
     foreach ($unresolved as $ref) {
-      if (empty($ref_map[$ref])) {
+
+      // See T13647. If this symbol is exactly 40 hex characters long, it may
+      // never resolve as a branch or tag name. Filter these symbols out for
+      // consistency with Git behavior -- and to avoid an expensive
+      // "git for-each-ref" when resolving only commit hashes, which happens
+      // during repository updates.
+
+      if (preg_match('(^[a-f0-9]{40}\z)', $ref)) {
         continue;
       }
 
-      foreach ($ref_map[$ref] as $result) {
-        $fields = $result->getRawFields();
-        $objectname = idx($fields, 'refname');
-        if (!strncmp($objectname, $tag_prefix, strlen($tag_prefix))) {
-          $type = 'tag';
-        } else {
-          $type = 'branch';
+      $possible_symbols[$ref] = $ref;
+    }
+
+    // First, resolve branches and tags.
+    if ($possible_symbols) {
+      $ref_map = id(new DiffusionLowLevelGitRefQuery())
+        ->setRepository($repository)
+        ->withRefTypes(
+          array(
+            PhabricatorRepositoryRefCursor::TYPE_BRANCH,
+            PhabricatorRepositoryRefCursor::TYPE_TAG,
+          ))
+        ->execute();
+      $ref_map = mgroup($ref_map, 'getShortName');
+
+      $tag_prefix = 'refs/tags/';
+      foreach ($possible_symbols as $ref) {
+        if (empty($ref_map[$ref])) {
+          continue;
         }
 
-        $info = array(
-          'type' => $type,
-          'identifier' => $result->getCommitIdentifier(),
-        );
-
-        if ($type == 'tag') {
-          $alternate = idx($fields, 'objectname');
-          if ($alternate) {
-            $info['alternate'] = $alternate;
+        foreach ($ref_map[$ref] as $result) {
+          $fields = $result->getRawFields();
+          $objectname = idx($fields, 'refname');
+          if (!strncmp($objectname, $tag_prefix, strlen($tag_prefix))) {
+            $type = 'tag';
+          } else {
+            $type = 'branch';
           }
+
+          $info = array(
+            'type' => $type,
+            'identifier' => $result->getCommitIdentifier(),
+          );
+
+          if ($type == 'tag') {
+            $alternate = idx($fields, 'objectname');
+            if ($alternate) {
+              $info['alternate'] = $alternate;
+            }
+          }
+
+          $results[$ref][] = $info;
         }
 
-        $results[$ref][] = $info;
+        unset($unresolved[$ref]);
       }
-
-      unset($unresolved[$ref]);
     }
 
     // If we resolved everything, we're done.
@@ -195,13 +213,15 @@ final class DiffusionLowLevelResolveRefsQuery
 
       $alternate = null;
       if ($type == 'tag') {
-        $alternate = $identifier;
-        $identifier = idx($tag_map, $ref);
-        if (!$identifier) {
-          throw new Exception(
-            pht(
-              "Failed to look up tag '%s'!",
-              $ref));
+        $tag_identifier = idx($tag_map, $ref);
+        if ($tag_identifier === null) {
+          // This can happen when we're asked to resolve the hash of a "tag"
+          // object created with "git tag --annotate" that isn't currently
+          // reachable from any ref. Just leave things as they are.
+        } else {
+          // Otherwise, we have a normal named tag.
+          $alternate = $identifier;
+          $identifier = $tag_identifier;
         }
       }
 
@@ -250,6 +270,66 @@ final class DiffusionLowLevelResolveRefsQuery
       }
 
       unset($unresolved[$key]);
+    }
+
+    if (!$unresolved) {
+      return $results;
+    }
+
+    // If some of the refs look like hashes, try to bulk resolve them. This
+    // workflow happens via RefEngine and bulk resolution is dramatically
+    // faster than individual resolution. See PHI158.
+
+    $hashlike = array();
+    foreach ($unresolved as $key => $ref) {
+      if (preg_match('/^[a-f0-9]{40}\z/', $ref)) {
+        $hashlike[$key] = $ref;
+      }
+    }
+
+    if (count($hashlike) > 1) {
+      $hashlike_map = array();
+
+      $hashlike_groups = array_chunk($hashlike, 64, true);
+      foreach ($hashlike_groups as $hashlike_group) {
+        $hashlike_arg = array();
+        foreach ($hashlike_group as $hashlike_ref) {
+          $hashlike_arg[] = hgsprintf('%s', $hashlike_ref);
+        }
+        $hashlike_arg = '('.implode(' or ', $hashlike_arg).')';
+
+        list($err, $refs) = $repository->execLocalCommand(
+          'log --template=%s --rev %s',
+          '{node}\n',
+          $hashlike_arg);
+        if ($err) {
+          // NOTE: If any ref fails to resolve, Mercurial will exit with an
+          // error. We just give up on the whole group and resolve it
+          // individually below. In theory, we could split it into subgroups
+          // but the pathway where this bulk resolution matters rarely tries
+          // to resolve missing refs (see PHI158).
+          continue;
+        }
+
+        $refs = phutil_split_lines($refs, false);
+
+        foreach ($refs as $ref) {
+          $hashlike_map[$ref] = true;
+        }
+      }
+
+      foreach ($unresolved as $key => $ref) {
+        if (!isset($hashlike_map[$ref])) {
+          continue;
+        }
+
+        $results[$ref][] = array(
+          'type' => 'commit',
+          'identifier' => $ref,
+        );
+
+        unset($unresolved[$key]);
+      }
     }
 
     if (!$unresolved) {

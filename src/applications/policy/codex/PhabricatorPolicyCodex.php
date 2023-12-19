@@ -29,6 +29,17 @@ abstract class PhabricatorPolicyCodex
     return array();
   }
 
+  public function getPolicyForEdit($capability) {
+    return $this->getObject()->getPolicy($capability);
+  }
+
+  public function getDefaultPolicy() {
+    return PhabricatorPolicyQuery::getDefaultPolicyForObject(
+      $this->viewer,
+      $this->object,
+      $this->capability);
+  }
+
   final protected function newRule() {
     return new PhabricatorPolicyCodexRuleDescription();
   }

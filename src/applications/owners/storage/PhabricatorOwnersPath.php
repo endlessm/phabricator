@@ -4,7 +4,9 @@ final class PhabricatorOwnersPath extends PhabricatorOwnersDAO {
 
   protected $packageID;
   protected $repositoryPHID;
+  protected $pathIndex;
   protected $path;
+  protected $pathDisplay;
   protected $excluded;
 
   private $fragments;
@@ -14,23 +16,35 @@ final class PhabricatorOwnersPath extends PhabricatorOwnersDAO {
     return array(
       self::CONFIG_TIMESTAMPS => false,
       self::CONFIG_COLUMN_SCHEMA => array(
-        'path' => 'text255',
+        'path' => 'text',
+        'pathDisplay' => 'text',
+        'pathIndex' => 'bytes12',
         'excluded' => 'bool',
       ),
       self::CONFIG_KEY_SCHEMA => array(
-        'packageID' => array(
-          'columns' => array('packageID'),
+        'key_path' => array(
+          'columns' => array('packageID', 'repositoryPHID', 'pathIndex'),
+          'unique' => true,
+        ),
+        'key_repository' => array(
+          'columns' => array('repositoryPHID', 'pathIndex'),
         ),
       ),
     ) + parent::getConfiguration();
   }
 
-
   public static function newFromRef(array $ref) {
     $path = new PhabricatorOwnersPath();
     $path->repositoryPHID = $ref['repositoryPHID'];
-    $path->path = $ref['path'];
+
+    $raw_path = $ref['path'];
+
+    $path->pathIndex = PhabricatorHash::digestForIndex($raw_path);
+    $path->path = $raw_path;
+    $path->pathDisplay = $raw_path;
+
     $path->excluded = $ref['excluded'];
+
     return $path;
   }
 
@@ -38,6 +52,7 @@ final class PhabricatorOwnersPath extends PhabricatorOwnersDAO {
     return array(
       'repositoryPHID' => $this->getRepositoryPHID(),
       'path' => $this->getPath(),
+      'display' => $this->getPathDisplay(),
       'excluded' => (int)$this->getExcluded(),
     );
   }
@@ -64,14 +79,37 @@ final class PhabricatorOwnersPath extends PhabricatorOwnersDAO {
   public static function getSetFromTransactionValue(array $v) {
     $set = array();
     foreach ($v as $ref) {
-      $set[$ref['repositoryPHID']][$ref['path']][$ref['excluded']] = true;
+      $key = self::getScalarKeyForRef($ref);
+      $set[$key] = true;
     }
     return $set;
   }
 
   public static function isRefInSet(array $ref, array $set) {
-    return isset($set[$ref['repositoryPHID']][$ref['path']][$ref['excluded']]);
+    $key = self::getScalarKeyForRef($ref);
+    return isset($set[$key]);
   }
+
+  private static function getScalarKeyForRef(array $ref) {
+    // See T13464. When building refs from raw transactions, the path has
+    // not been normalized yet and doesn't have a separate "display" path.
+    // If the "display" path isn't populated, just use the actual path to
+    // build the ref key.
+
+    if (isset($ref['display'])) {
+      $display = $ref['display'];
+    } else {
+      $display = $ref['path'];
+    }
+
+    return sprintf(
+      'repository=%s path=%s display=%s excluded=%d',
+      $ref['repositoryPHID'],
+      $ref['path'],
+      $display,
+      $ref['excluded']);
+  }
+
 
   /**
    * Get the number of directory matches between this path specification and

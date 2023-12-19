@@ -21,6 +21,10 @@ final class PhabricatorNotificationsSettingsPanel
     return pht('Notifications');
   }
 
+  public function getPanelMenuIcon() {
+    return 'fa-bell-o';
+  }
+
   public function getPanelGroupKey() {
     return PhabricatorSettingsApplicationsPanelGroup::PANELGROUPKEY;
   }
@@ -64,8 +68,9 @@ final class PhabricatorNotificationsSettingsPanel
       'span',
       array(),
       array(
-        pht('This browser has not yet granted permission to send desktop '.
-        'notifications for this Phabricator instance.'),
+        pht(
+          'Your browser has not yet granted this server permission to send '.
+          'desktop notifications.'),
         phutil_tag('br'),
         phutil_tag('br'),
         javelin_tag(
@@ -79,13 +84,13 @@ final class PhabricatorNotificationsSettingsPanel
     $granted_status = phutil_tag(
       'span',
       array(),
-      pht('This browser has been granted permission to send desktop '.
-          'notifications for this Phabricator instance.'));
+      pht('Your browser has granted this server permission to send desktop '.
+          'notifications.'));
     $denied_status = phutil_tag(
       'span',
       array(),
       pht('This browser has denied permission to send desktop notifications '.
-          'for this Phabricator instance. Consult your browser settings / '.
+          'to this server. Consult your browser settings / '.
           'documentation to figure out how to clear this setting, do so, '.
           'and then re-visit this page to grant permission.'));
 
@@ -142,8 +147,8 @@ final class PhabricatorNotificationsSettingsPanel
         ->setOptions(PhabricatorNotificationsSetting::getOptionsMap())
         ->setCaption(
           pht(
-            'Phabricator can send real-time notifications to your web browser '.
-            'or to your desktop. Select where you\'d want to receive these '.
+            'This server can send real-time notifications to your web browser '.
+            'or to your desktop. Select where you want to receive these '.
             'real-time updates.'))
         ->initBehavior(
           'desktop-notifications-control',

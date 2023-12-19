@@ -9,13 +9,22 @@ final class PhabricatorRepositoryRefEngine
 
   private $newPositions = array();
   private $deadPositions = array();
-  private $closeCommits = array();
-  private $hasNoCursors;
+  private $permanentCommits = array();
+  private $rebuild;
+
+  public function setRebuild($rebuild) {
+    $this->rebuild = $rebuild;
+    return $this;
+  }
+
+  public function getRebuild() {
+    return $this->rebuild;
+  }
 
   public function updateRefs() {
     $this->newPositions = array();
     $this->deadPositions = array();
-    $this->closeCommits = array();
+    $this->permanentCommits = array();
 
     $repository = $this->getRepository();
     $viewer = $this->getViewer();
@@ -60,15 +69,17 @@ final class PhabricatorRepositoryRefEngine
       ->execute();
     $cursor_groups = mgroup($all_cursors, 'getRefType');
 
-    $this->hasNoCursors = (!$all_cursors);
-
-    // Find all the heads of closing refs.
+    // Find all the heads of permanent refs.
     $all_closing_heads = array();
     foreach ($all_cursors as $cursor) {
-      $should_close = $this->shouldCloseRef(
-        $cursor->getRefType(),
-        $cursor->getRefName());
-      if (!$should_close) {
+
+      // See T13284. Note that we're considering whether this ref was a
+      // permanent ref or not the last time we updated refs for this
+      // repository. This allows us to handle things properly when a ref
+      // is reconfigured from non-permanent to permanent.
+
+      $was_permanent = $cursor->getIsPermanent();
+      if (!$was_permanent) {
         continue;
       }
 
@@ -76,6 +87,7 @@ final class PhabricatorRepositoryRefEngine
         $all_closing_heads[] = $identifier;
       }
     }
+
     $all_closing_heads = array_unique($all_closing_heads);
     $all_closing_heads = $this->removeMissingCommits($all_closing_heads);
 
@@ -84,15 +96,21 @@ final class PhabricatorRepositoryRefEngine
       $this->updateCursors($cursor_group, $refs, $type, $all_closing_heads);
     }
 
-    if ($this->closeCommits) {
-      $this->setCloseFlagOnCommits($this->closeCommits);
+    if ($this->permanentCommits) {
+      $this->setPermanentFlagOnCommits($this->permanentCommits);
     }
 
-    if ($this->newPositions || $this->deadPositions) {
+    $save_cursors = $this->getCursorsForUpdate($repository, $all_cursors);
+
+    if ($this->newPositions || $this->deadPositions || $save_cursors) {
       $repository->openTransaction();
 
         $this->saveNewPositions();
         $this->deleteDeadPositions();
+
+        foreach ($save_cursors as $cursor) {
+          $cursor->save();
+        }
 
       $repository->saveTransaction();
     }
@@ -101,6 +119,30 @@ final class PhabricatorRepositoryRefEngine
     if ($branches && $branches_may_close) {
       $this->updateBranchStates($repository, $branches);
     }
+  }
+
+  private function getCursorsForUpdate(
+    PhabricatorRepository $repository,
+    array $cursors) {
+    assert_instances_of($cursors, 'PhabricatorRepositoryRefCursor');
+
+    $publisher = $repository->newPublisher();
+
+    $results = array();
+
+    foreach ($cursors as $cursor) {
+      $diffusion_ref = $cursor->newDiffusionRepositoryRef();
+
+      $is_permanent = $publisher->isPermanentRef($diffusion_ref);
+      if ($is_permanent == $cursor->getIsPermanent()) {
+        continue;
+      }
+
+      $cursor->setIsPermanent((int)$is_permanent);
+      $results[] = $cursor;
+    }
+
+    return $results;
   }
 
   private function updateBranchStates(
@@ -177,9 +219,9 @@ final class PhabricatorRepositoryRefEngine
     return $this;
   }
 
-  private function markCloseCommits(array $identifiers) {
+  private function markPermanentCommits(array $identifiers) {
     foreach ($identifiers as $identifier) {
-      $this->closeCommits[$identifier] = $identifier;
+      $this->permanentCommits[$identifier] = $identifier;
     }
     return $this;
   }
@@ -219,6 +261,7 @@ final class PhabricatorRepositoryRefEngine
     $ref_type,
     array $all_closing_heads) {
     $repository = $this->getRepository();
+    $publisher = $repository->newPublisher();
 
     // NOTE: Mercurial branches may have multiple branch heads; this logic
     // is complex primarily to account for that.
@@ -301,13 +344,43 @@ final class PhabricatorRepositoryRefEngine
         $this->markPositionNew($new_position);
       }
 
-      if ($this->shouldCloseRef($ref_type, $name)) {
-        foreach ($added_commits as $identifier) {
+      if ($publisher->isPermanentRef(head($refs))) {
+
+        // See T13284. If this cursor was already marked as permanent, we
+        // only need to publish the newly created ref positions. However, if
+        // this cursor was not previously permanent but has become permanent,
+        // we need to publish all the ref positions.
+
+        // This corresponds to users reconfiguring a branch to make it
+        // permanent without pushing any new commits to it.
+
+        $is_rebuild = $this->getRebuild();
+        $was_permanent = $ref_cursor->getIsPermanent();
+
+        if ($is_rebuild || !$was_permanent) {
+          $update_all = true;
+        } else {
+          $update_all = false;
+        }
+
+        if ($update_all) {
+          $update_commits = $new_commits;
+        } else {
+          $update_commits = $added_commits;
+        }
+
+        if ($is_rebuild) {
+          $exclude = array();
+        } else {
+          $exclude = $all_closing_heads;
+        }
+
+        foreach ($update_commits as $identifier) {
           $new_identifiers = $this->loadNewCommitIdentifiers(
             $identifier,
-            $all_closing_heads);
+            $exclude);
 
-          $this->markCloseCommits($new_identifiers);
+          $this->markPermanentCommits($new_identifiers);
         }
       }
     }
@@ -332,22 +405,6 @@ final class PhabricatorRepositoryRefEngine
         $this->markPositionDead($position);
       }
     }
-  }
-
-  private function shouldCloseRef($ref_type, $ref_name) {
-    if ($ref_type !== PhabricatorRepositoryRefCursor::TYPE_BRANCH) {
-      return false;
-    }
-
-    if ($this->hasNoCursors) {
-      // If we don't have any cursors, don't close things. Particularly, this
-      // corresponds to the case where you've just updated to this code on an
-      // existing repository: we don't want to requeue message steps for every
-      // commit on a closeable ref.
-      return false;
-    }
-
-    return $this->getRepository()->shouldAutocloseBranch($ref_name);
   }
 
   /**
@@ -407,16 +464,31 @@ final class PhabricatorRepositoryRefEngine
         return phutil_split_lines($stdout, $retain_newlines = false);
       case PhabricatorRepositoryType::REPOSITORY_TYPE_GIT:
         if ($all_closing_heads) {
-          list($stdout) = $this->getRepository()->execxLocalCommand(
-            'log --format=%s %s --not %Ls',
-            '%H',
-            $new_head,
-            $all_closing_heads);
+
+          // See PHI1474. This length of list may exceed the maximum size of
+          // a command line argument list, so pipe the list in using "--stdin"
+          // instead.
+
+          $ref_list = array();
+          $ref_list[] = $new_head;
+          foreach ($all_closing_heads as $old_head) {
+            $ref_list[] = '^'.$old_head;
+          }
+          $ref_list[] = '--';
+          $ref_list = implode("\n", $ref_list)."\n";
+
+          $future = $this->getRepository()->getLocalCommandFuture(
+            'log %s --stdin --',
+            '--format=%H');
+
+          list($stdout) = $future
+            ->write($ref_list)
+            ->resolvex();
         } else {
           list($stdout) = $this->getRepository()->execxLocalCommand(
-            'log --format=%s %s',
-            '%H',
-            $new_head);
+            'log %s %s --',
+            '--format=%H',
+            gitsprintf('%s', $new_head));
         }
 
         $stdout = trim($stdout);
@@ -430,13 +502,13 @@ final class PhabricatorRepositoryRefEngine
   }
 
   /**
-   * Mark a list of commits as closeable, and queue workers for those commits
+   * Mark a list of commits as permanent, and queue workers for those commits
    * which don't already have the flag.
    */
-  private function setCloseFlagOnCommits(array $identifiers) {
+  private function setPermanentFlagOnCommits(array $identifiers) {
     $repository = $this->getRepository();
     $commit_table = new PhabricatorRepositoryCommit();
-    $conn_w = $commit_table->establishConnection('w');
+    $conn = $commit_table->establishConnection('w');
 
     $vcs = $repository->getVersionControlSystem();
     switch ($vcs) {
@@ -453,15 +525,46 @@ final class PhabricatorRepositoryRefEngine
         throw new Exception(pht("Unknown repository type '%s'!", $vcs));
     }
 
-    $all_commits = queryfx_all(
-      $conn_w,
-      'SELECT id, commitIdentifier, importStatus FROM %T
-        WHERE repositoryID = %d AND commitIdentifier IN (%Ls)',
-      $commit_table->getTableName(),
-      $repository->getID(),
-      $identifiers);
+    $identifier_tokens = array();
+    foreach ($identifiers as $identifier) {
+      $identifier_tokens[] = qsprintf(
+        $conn,
+        '%s',
+        $identifier);
+    }
 
-    $closeable_flag = PhabricatorRepositoryCommit::IMPORTED_CLOSEABLE;
+    $all_commits = array();
+    foreach (PhabricatorLiskDAO::chunkSQL($identifier_tokens) as $chunk) {
+      $rows = queryfx_all(
+        $conn,
+        'SELECT id, phid, commitIdentifier, importStatus FROM %T
+          WHERE repositoryID = %d AND commitIdentifier IN (%LQ)',
+        $commit_table->getTableName(),
+        $repository->getID(),
+        $chunk);
+      foreach ($rows as $row) {
+        $all_commits[] = $row;
+      }
+    }
+
+    $commit_refs = array();
+    foreach ($identifiers as $identifier) {
+
+      // See T13591. This construction is a bit ad-hoc, but the priority
+      // function currently only cares about the number of refs we have
+      // discovered, so we'll get the right result even without filling
+      // these records out in detail.
+
+      $commit_refs[] = id(new PhabricatorRepositoryCommitRef())
+        ->setIdentifier($identifier);
+    }
+
+    $task_priority = $this->getImportTaskPriority(
+      $repository,
+      $commit_refs);
+
+    $permanent_flag = PhabricatorRepositoryCommit::IMPORTED_PERMANENT;
+    $published_flag = PhabricatorRepositoryCommit::IMPORTED_PUBLISH;
 
     $all_commits = ipull($all_commits, null, 'commitIdentifier');
     foreach ($identifiers as $identifier) {
@@ -475,20 +578,28 @@ final class PhabricatorRepositoryRefEngine
             $identifier));
       }
 
-      if (!($row['importStatus'] & $closeable_flag)) {
+      $import_status = $row['importStatus'];
+      if (!($import_status & $permanent_flag)) {
+        // Set the "permanent" flag.
+        $import_status = ($import_status | $permanent_flag);
+
+        // See T13580. Clear the "published" flag, so publishing executes
+        // again. We may have previously performed a no-op "publish" on the
+        // commit to make sure it has all bits in the "IMPORTED_ALL" bitmask.
+        $import_status = ($import_status & ~$published_flag);
+
         queryfx(
-          $conn_w,
-          'UPDATE %T SET importStatus = (importStatus | %d) WHERE id = %d',
+          $conn,
+          'UPDATE %T SET importStatus = %d WHERE id = %d',
           $commit_table->getTableName(),
-          $closeable_flag,
+          $import_status,
           $row['id']);
 
-        $data = array(
-          'commitID' => $row['id'],
-          'only' => true,
-        );
-
-        PhabricatorWorker::scheduleTask($class, $data);
+        $this->queueCommitImportTask(
+          $repository,
+          $row['phid'],
+          $task_priority,
+          $via = 'ref');
       }
     }
 
@@ -504,6 +615,13 @@ final class PhabricatorRepositoryRefEngine
       ->setRepositoryPHID($repository->getPHID())
       ->setRefType($ref_type)
       ->setRefName($ref_name);
+
+    $publisher = $repository->newPublisher();
+
+    $diffusion_ref = $cursor->newDiffusionRepositoryRef();
+    $is_permanent = $publisher->isPermanentRef($diffusion_ref);
+
+    $cursor->setIsPermanent((int)$is_permanent);
 
     try {
       return $cursor->save();

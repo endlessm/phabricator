@@ -40,8 +40,33 @@ abstract class ConduitAPIMethod
    */
   abstract public function getMethodDescription();
 
-  public function getMethodDocumentation() {
-    return null;
+  final public function getDocumentationPages(PhabricatorUser $viewer) {
+    $pages = $this->newDocumentationPages($viewer);
+    return $pages;
+  }
+
+  protected function newDocumentationPages(PhabricatorUser $viewer) {
+    return array();
+  }
+
+  final protected function newDocumentationPage(PhabricatorUser $viewer) {
+    return id(new ConduitAPIDocumentationPage())
+      ->setIconIcon('fa-chevron-right');
+  }
+
+  final protected function newDocumentationBoxPage(
+    PhabricatorUser $viewer,
+    $title,
+    $content) {
+
+    $box_view = id(new PHUIObjectBoxView())
+      ->setHeaderText($title)
+      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
+      ->setTable($content);
+
+    return $this->newDocumentationPage($viewer)
+      ->setName($title)
+      ->setContent($box_view);
   }
 
   abstract protected function defineParamTypes();
@@ -120,7 +145,19 @@ abstract class ConduitAPIMethod
   public function executeMethod(ConduitAPIRequest $request) {
     $this->setViewer($request->getUser());
 
+    $client = $this->newConduitCallProxyClient($request);
+    if ($client) {
+      // We're proxying, so just make an intracluster call.
+      return $client->callMethodSynchronous(
+        $this->getAPIMethodName(),
+        $request->getAllParameters());
+    }
+
     return $this->execute($request);
+  }
+
+  protected function newConduitCallProxyClient(ConduitAPIRequest $request) {
+    return null;
   }
 
   abstract public function getAPIMethodName();
@@ -407,6 +444,21 @@ abstract class ConduitAPIMethod
       $viewer,
       $this->getApplication(),
       $capability);
+  }
+
+  final protected function newRemarkupDocumentationView($remarkup) {
+    $viewer = $this->getViewer();
+
+    $view = new PHUIRemarkupView($viewer, $remarkup);
+
+    $view->setRemarkupOptions(
+      array(
+        PHUIRemarkupView::OPTION_PRESERVE_LINEBREAKS => false,
+      ));
+
+    return id(new PHUIBoxView())
+      ->appendChild($view)
+      ->addPadding(PHUI::PADDING_LARGE);
   }
 
 }

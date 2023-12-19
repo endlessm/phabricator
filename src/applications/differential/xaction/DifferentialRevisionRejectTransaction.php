@@ -6,12 +6,15 @@ final class DifferentialRevisionRejectTransaction
   const TRANSACTIONTYPE = 'differential.revision.reject';
   const ACTIONKEY = 'reject';
 
-  protected function getRevisionActionLabel() {
-    return pht("Request Changes \xE2\x9C\x98");
+  protected function getRevisionActionLabel(
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
+    return pht('Request Changes');
   }
 
   protected function getRevisionActionDescription(
-    DifferentialRevision $revision) {
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('This revision will be returned to the author for updates.');
   }
 
@@ -73,7 +76,7 @@ final class DifferentialRevisionRejectTransaction
           'not own.'));
     }
 
-    if ($object->isDraft()) {
+    if ($object->isDraft() || !$object->getShouldBroadcast()) {
       throw new Exception(
         pht('You can not request changes to a draft revision.'));
     }
@@ -97,6 +100,14 @@ final class DifferentialRevisionRejectTransaction
       '%s requested changes to %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'request-changes';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

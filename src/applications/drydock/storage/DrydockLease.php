@@ -1,7 +1,9 @@
 <?php
 
 final class DrydockLease extends DrydockDAO
-  implements PhabricatorPolicyInterface {
+  implements
+    PhabricatorPolicyInterface,
+    PhabricatorConduitResultInterface {
 
   protected $resourcePHID;
   protected $resourceType;
@@ -10,6 +12,8 @@ final class DrydockLease extends DrydockDAO
   protected $authorizingPHID;
   protected $attributes = array();
   protected $status = DrydockLeaseStatus::STATUS_PENDING;
+  protected $acquiredEpoch;
+  protected $activatedEpoch;
 
   private $resource = self::ATTACHABLE;
   private $unconsumedCommands = self::ATTACHABLE;
@@ -36,8 +40,8 @@ final class DrydockLease extends DrydockDAO
    * a lease, as you don't need to explicitly handle exceptions to properly
    * release the lease.
    */
-  public function releaseOnDestruction() {
-    $this->releaseOnDestruction = true;
+  public function setReleaseOnDestruction($release) {
+    $this->releaseOnDestruction = $release;
     return $this;
   }
 
@@ -62,6 +66,22 @@ final class DrydockLease extends DrydockDAO
     $this->scheduleUpdate();
   }
 
+  public function setStatus($status) {
+    if ($status == DrydockLeaseStatus::STATUS_ACQUIRED) {
+      if (!$this->getAcquiredEpoch()) {
+        $this->setAcquiredEpoch(PhabricatorTime::getNow());
+      }
+    }
+
+    if ($status == DrydockLeaseStatus::STATUS_ACTIVE) {
+      if (!$this->getActivatedEpoch()) {
+        $this->setActivatedEpoch(PhabricatorTime::getNow());
+      }
+    }
+
+    return parent::setStatus($status);
+  }
+
   public function getLeaseName() {
     return pht('Lease %d', $this->getID());
   }
@@ -78,10 +98,21 @@ final class DrydockLease extends DrydockDAO
         'resourceType' => 'text128',
         'ownerPHID' => 'phid?',
         'resourcePHID' => 'phid?',
+        'acquiredEpoch' => 'epoch?',
+        'activatedEpoch' => 'epoch?',
       ),
       self::CONFIG_KEY_SCHEMA => array(
         'key_resource' => array(
           'columns' => array('resourcePHID', 'status'),
+        ),
+        'key_status' => array(
+          'columns' => array('status'),
+        ),
+        'key_owner' => array(
+          'columns' => array('ownerPHID'),
+        ),
+        'key_recent' => array(
+          'columns' => array('resourcePHID', 'dateModified'),
         ),
       ),
     ) + parent::getConfiguration();
@@ -172,57 +203,6 @@ final class DrydockLease extends DrydockDAO
     return $this;
   }
 
-  public function isActivating() {
-    switch ($this->getStatus()) {
-      case DrydockLeaseStatus::STATUS_PENDING:
-      case DrydockLeaseStatus::STATUS_ACQUIRED:
-        return true;
-    }
-
-    return false;
-  }
-
-  public function isActive() {
-    switch ($this->getStatus()) {
-      case DrydockLeaseStatus::STATUS_ACTIVE:
-        return true;
-    }
-
-    return false;
-  }
-
-  public function waitUntilActive() {
-    while (true) {
-      $lease = $this->reload();
-      if (!$lease) {
-        throw new Exception(pht('Failed to reload lease.'));
-      }
-
-      $status = $lease->getStatus();
-
-      switch ($status) {
-        case DrydockLeaseStatus::STATUS_ACTIVE:
-          return;
-        case DrydockLeaseStatus::STATUS_RELEASED:
-          throw new Exception(pht('Lease has already been released!'));
-        case DrydockLeaseStatus::STATUS_DESTROYED:
-          throw new Exception(pht('Lease has already been destroyed!'));
-        case DrydockLeaseStatus::STATUS_BROKEN:
-          throw new Exception(pht('Lease has been broken!'));
-        case DrydockLeaseStatus::STATUS_PENDING:
-        case DrydockLeaseStatus::STATUS_ACQUIRED:
-          break;
-        default:
-          throw new Exception(
-            pht(
-              'Lease has unknown status "%s".',
-              $status));
-      }
-
-      sleep(1);
-    }
-  }
-
   public function setActivateWhenAcquired($activate) {
     $this->activateWhenAcquired = true;
     return $this;
@@ -261,30 +241,75 @@ final class DrydockLease extends DrydockDAO
       }
     }
 
-    $this->openTransaction();
+    // Before we associate the lease with the resource, we lock the resource
+    // and reload it to make sure it is still pending or active. If we don't
+    // do this, the resource may have just been reclaimed. (Once we acquire
+    // the resource that stops it from being released, so we're nearly safe.)
+
+    $resource_phid = $resource->getPHID();
+    $hash = PhabricatorHash::digestForIndex($resource_phid);
+    $lock_key = 'drydock.resource:'.$hash;
+    $lock = PhabricatorGlobalLock::newLock($lock_key);
 
     try {
-      DrydockSlotLock::acquireLocks($this->getPHID(), $this->slotLocks);
-      $this->slotLocks = array();
-    } catch (DrydockSlotLockException $ex) {
-      $this->killTransaction();
-
-      $this->logEvent(
-        DrydockSlotLockFailureLogType::LOGCONST,
-        array(
-          'locks' => $ex->getLockMap(),
-        ));
-
-      throw $ex;
+      $lock->lock(15);
+    } catch (Exception $ex) {
+      throw new DrydockResourceLockException(
+        pht(
+          'Failed to acquire lock for resource ("%s") while trying to '.
+          'acquire lease ("%s").',
+          $resource->getPHID(),
+          $this->getPHID()));
     }
 
-    $this
-      ->setResourcePHID($resource->getPHID())
-      ->attachResource($resource)
-      ->setStatus($new_status)
-      ->save();
+    $resource->reload();
 
-    $this->saveTransaction();
+    if (($resource->getStatus() !== DrydockResourceStatus::STATUS_ACTIVE) &&
+        ($resource->getStatus() !== DrydockResourceStatus::STATUS_PENDING)) {
+      throw new DrydockAcquiredBrokenResourceException(
+        pht(
+          'Trying to acquire lease ("%s") on a resource ("%s") in the '.
+          'wrong status ("%s").',
+          $this->getPHID(),
+          $resource->getPHID(),
+          $resource->getStatus()));
+    }
+
+    $caught = null;
+    try {
+      $this->openTransaction();
+
+      try {
+        DrydockSlotLock::acquireLocks($this->getPHID(), $this->slotLocks);
+        $this->slotLocks = array();
+      } catch (DrydockSlotLockException $ex) {
+        $this->killTransaction();
+
+        $this->logEvent(
+          DrydockSlotLockFailureLogType::LOGCONST,
+          array(
+            'locks' => $ex->getLockMap(),
+          ));
+
+        throw $ex;
+      }
+
+      $this
+        ->setResourcePHID($resource->getPHID())
+        ->attachResource($resource)
+        ->setStatus($new_status)
+        ->save();
+
+      $this->saveTransaction();
+    } catch (Exception $ex) {
+      $caught = $ex;
+    }
+
+    $lock->unlock();
+
+    if ($caught) {
+      throw $caught;
+    }
 
     $this->isAcquired = true;
 
@@ -354,30 +379,6 @@ final class DrydockLease extends DrydockDAO
     return $this->isActivated;
   }
 
-  public function canRelease() {
-    if (!$this->getID()) {
-      return false;
-    }
-
-    switch ($this->getStatus()) {
-      case DrydockLeaseStatus::STATUS_RELEASED:
-      case DrydockLeaseStatus::STATUS_DESTROYED:
-        return false;
-      default:
-        return true;
-    }
-  }
-
-  public function canReceiveCommands() {
-    switch ($this->getStatus()) {
-      case DrydockLeaseStatus::STATUS_RELEASED:
-      case DrydockLeaseStatus::STATUS_DESTROYED:
-        return false;
-      default:
-        return true;
-    }
-  }
-
   public function scheduleUpdate($epoch = null) {
     PhabricatorWorker::scheduleTask(
       'DrydockLeaseUpdateWorker',
@@ -389,6 +390,62 @@ final class DrydockLease extends DrydockDAO
         'objectPHID' => $this->getPHID(),
         'delayUntil' => ($epoch ? (int)$epoch : null),
       ));
+  }
+
+  public function getAllocatedResourcePHIDs() {
+    return $this->getAttribute('internal.resourcePHIDs.allocated', array());
+  }
+
+  public function setAllocatedResourcePHIDs(array $phids) {
+    return $this->setAttribute('internal.resourcePHIDs.allocated', $phids);
+  }
+
+  public function addAllocatedResourcePHIDs(array $phids) {
+    $allocated_phids = $this->getAllocatedResourcePHIDs();
+
+    foreach ($phids as $phid) {
+      $allocated_phids[$phid] = $phid;
+    }
+
+    return $this->setAllocatedResourcePHIDs($allocated_phids);
+  }
+
+  public function removeAllocatedResourcePHIDs(array $phids) {
+    $allocated_phids = $this->getAllocatedResourcePHIDs();
+
+    foreach ($phids as $phid) {
+      unset($allocated_phids[$phid]);
+    }
+
+    return $this->setAllocatedResourcePHIDs($allocated_phids);
+  }
+
+  public function getReclaimedResourcePHIDs() {
+    return $this->getAttribute('internal.resourcePHIDs.reclaimed', array());
+  }
+
+  public function setReclaimedResourcePHIDs(array $phids) {
+    return $this->setAttribute('internal.resourcePHIDs.reclaimed', $phids);
+  }
+
+  public function addReclaimedResourcePHIDs(array $phids) {
+    $reclaimed_phids = $this->getReclaimedResourcePHIDs();
+
+    foreach ($phids as $phid) {
+      $reclaimed_phids[$phid] = $phid;
+    }
+
+    return $this->setReclaimedResourcePHIDs($reclaimed_phids);
+  }
+
+  public function removeReclaimedResourcePHIDs(array $phids) {
+    $reclaimed_phids = $this->getReclaimedResourcePHIDs();
+
+    foreach ($phids as $phid) {
+      unset($reclaimed_phids[$phid]);
+    }
+
+    return $this->setReclaimedResourcePHIDs($reclaimed_phids);
   }
 
   public function setAwakenTaskIDs(array $ids) {
@@ -465,6 +522,55 @@ final class DrydockLease extends DrydockDAO
     return $this;
   }
 
+  public function getURI() {
+    $id = $this->getID();
+    return "/drydock/lease/{$id}/";
+  }
+
+  public function getDisplayName() {
+    return pht('Drydock Lease %d', $this->getID());
+  }
+
+
+/* -(  Status  )------------------------------------------------------------- */
+
+
+  public function getStatusObject() {
+    return DrydockLeaseStatus::newStatusObject($this->getStatus());
+  }
+
+  public function getStatusIcon() {
+    return $this->getStatusObject()->getIcon();
+  }
+
+  public function getStatusColor() {
+    return $this->getStatusObject()->getColor();
+  }
+
+  public function getStatusDisplayName() {
+    return $this->getStatusObject()->getDisplayName();
+  }
+
+  public function isActivating() {
+    return $this->getStatusObject()->isActivating();
+  }
+
+  public function isActive() {
+    return $this->getStatusObject()->isActive();
+  }
+
+  public function canRelease() {
+    if (!$this->getID()) {
+      return false;
+    }
+
+    return $this->getStatusObject()->canRelease();
+  }
+
+  public function canReceiveCommands() {
+    return $this->getStatusObject()->canReceiveCommands();
+  }
+
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */
 
@@ -495,6 +601,68 @@ final class DrydockLease extends DrydockDAO
 
   public function describeAutomaticCapability($capability) {
     return pht('Leases inherit policies from the resources they lease.');
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('resourcePHID')
+        ->setType('phid?')
+        ->setDescription(pht('PHID of the leased resource, if any.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('resourceType')
+        ->setType('string')
+        ->setDescription(pht('Type of resource being leased.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('until')
+        ->setType('int?')
+        ->setDescription(pht('Epoch at which this lease expires, if any.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('ownerPHID')
+        ->setType('phid?')
+        ->setDescription(pht('The PHID of the object that owns this lease.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('authorizingPHID')
+        ->setType('phid')
+        ->setDescription(pht(
+          'The PHID of the object that authorized this lease.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('status')
+        ->setType('map<string, wild>')
+        ->setDescription(pht(
+          "The string constant and name of this lease's status.")),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    $status = $this->getStatus();
+
+    $until = $this->getUntil();
+    if ($until) {
+      $until = (int)$until;
+    } else {
+      $until = null;
+    }
+
+    return array(
+      'resourcePHID' => $this->getResourcePHID(),
+      'resourceType' => $this->getResourceType(),
+      'until' => $until,
+      'ownerPHID' => $this->getOwnerPHID(),
+      'authorizingPHID' => $this->getAuthorizingPHID(),
+      'status' => array(
+        'value' => $status,
+        'name' => DrydockLeaseStatus::getNameForStatus($status),
+      ),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array();
   }
 
 }

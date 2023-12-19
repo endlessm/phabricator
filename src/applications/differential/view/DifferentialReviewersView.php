@@ -26,6 +26,8 @@ final class DifferentialReviewersView extends AphrontView {
   public function render() {
     $viewer = $this->getUser();
     $reviewers = $this->reviewers;
+    $diff = $this->diff;
+    $handles = $this->handles;
 
     $view = new PHUIStatusListView();
 
@@ -40,13 +42,19 @@ final class DifferentialReviewersView extends AphrontView {
       }
     }
 
+    PhabricatorPolicyFilterSet::loadHandleViewCapabilities(
+      $viewer,
+      $handles,
+      array($diff));
+
     $reviewers = $head + $tail;
     foreach ($reviewers as $reviewer) {
       $phid = $reviewer->getReviewerPHID();
-      $handle = $this->handles[$phid];
+      $handle = $handles[$phid];
 
       $action_phid = $reviewer->getLastActionDiffPHID();
       $is_current_action = $this->isCurrent($action_phid);
+      $is_voided = (bool)$reviewer->getVoidedPHID();
 
       $comment_phid = $reviewer->getLastCommentDiffPHID();
       $is_current_comment = $this->isCurrent($comment_phid);
@@ -86,7 +94,7 @@ final class DifferentialReviewersView extends AphrontView {
           break;
 
         case DifferentialReviewerStatus::STATUS_ACCEPTED:
-          if ($is_current_action) {
+          if ($is_current_action && !$is_voided) {
             $icon = PHUIStatusItemView::ICON_ACCEPT;
             $color = 'green';
             if ($authority_name !== null) {
@@ -97,7 +105,12 @@ final class DifferentialReviewersView extends AphrontView {
           } else {
             $icon = 'fa-check-circle-o';
             $color = 'bluegrey';
-            if ($authority_name !== null) {
+
+            if (!$is_current_action && $is_voided) {
+              // The reviewer accepted the revision, but later the author
+              // used "Request Review" to request an updated review.
+              $label = pht('Accepted Earlier');
+            } else if ($authority_name !== null) {
               $label = pht('Accepted Prior Diff (by %s)', $authority_name);
             } else {
               $label = pht('Accepted Prior Diff');
@@ -148,11 +161,23 @@ final class DifferentialReviewersView extends AphrontView {
       }
 
       $item->setIcon($icon, $color, $label);
-      $item->setTarget($handle->renderHovercardLink());
+      $item->setTarget(
+        $handle->renderHovercardLink(
+          null,
+          $diff->getPHID()));
 
       if ($reviewer->isPackage()) {
         if (!$reviewer->getChangesets()) {
           $item->setNote(pht('(Owns No Changed Paths)'));
+        }
+      }
+
+      if ($handle->hasCapabilities()) {
+        if (!$handle->hasViewCapability($diff)) {
+          $item
+            ->setIcon('fa-eye-slash', 'red')
+            ->setNote(pht('No View Permission'))
+            ->setIsExiled(true);
         }
       }
 

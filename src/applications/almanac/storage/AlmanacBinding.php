@@ -7,12 +7,12 @@ final class AlmanacBinding
     PhabricatorApplicationTransactionInterface,
     AlmanacPropertyInterface,
     PhabricatorDestructibleInterface,
-    PhabricatorExtendedPolicyInterface {
+    PhabricatorExtendedPolicyInterface,
+    PhabricatorConduitResultInterface {
 
   protected $servicePHID;
   protected $devicePHID;
   protected $interfacePHID;
-  protected $mailKey;
   protected $isDisabled;
 
   private $service = self::ATTACHABLE;
@@ -23,6 +23,7 @@ final class AlmanacBinding
   public static function initializeNewBinding(AlmanacService $service) {
     return id(new AlmanacBinding())
       ->setServicePHID($service->getPHID())
+      ->attachService($service)
       ->attachAlmanacProperties(array())
       ->setIsDisabled(0);
   }
@@ -31,7 +32,6 @@ final class AlmanacBinding
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_COLUMN_SCHEMA => array(
-        'mailKey' => 'bytes20',
         'isDisabled' => 'bool',
       ),
       self::CONFIG_KEY_SCHEMA => array(
@@ -49,15 +49,8 @@ final class AlmanacBinding
     ) + parent::getConfiguration();
   }
 
-  public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(AlmanacBindingPHIDType::TYPECONST);
-  }
-
-  public function save() {
-    if (!$this->mailKey) {
-      $this->mailKey = Filesystem::readRandomCharacters(20);
-    }
-    return parent::save();
+  public function getPHIDType() {
+    return AlmanacBindingPHIDType::TYPECONST;
   }
 
   public function getName() {
@@ -65,7 +58,9 @@ final class AlmanacBinding
   }
 
   public function getURI() {
-    return '/almanac/binding/'.$this->getID().'/';
+    return urisprintf(
+      '/almanac/binding/%s/',
+      $this->getID());
   }
 
   public function getService() {
@@ -84,6 +79,10 @@ final class AlmanacBinding
   public function attachDevice(AlmanacDevice $device) {
     $this->device = $device;
     return $this;
+  }
+
+  public function hasInterface() {
+    return ($this->interface !== self::ATTACHABLE);
   }
 
   public function getInterface() {
@@ -127,11 +126,19 @@ final class AlmanacBinding
   }
 
   public function getAlmanacPropertyFieldSpecifications() {
-    return array();
+    return $this->getService()->getBindingFieldSpecifications($this);
   }
 
   public function newAlmanacPropertyEditEngine() {
     return new AlmanacBindingPropertyEditEngine();
+  }
+
+  public function getAlmanacPropertySetTransactionType() {
+    return AlmanacBindingSetPropertyTransaction::TRANSACTIONTYPE;
+  }
+
+  public function getAlmanacPropertyDeleteTransactionType() {
+    return AlmanacBindingDeletePropertyTransaction::TRANSACTIONTYPE;
   }
 
 
@@ -192,20 +199,10 @@ final class AlmanacBinding
     return new AlmanacBindingEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new AlmanacBindingTransaction();
   }
 
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-
-    return $timeline;
-  }
 
 /* -(  PhabricatorDestructibleInterface  )----------------------------------- */
 
@@ -216,5 +213,45 @@ final class AlmanacBinding
     $this->delete();
   }
 
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('servicePHID')
+        ->setType('phid')
+        ->setDescription(pht('The bound service.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('devicePHID')
+        ->setType('phid')
+        ->setDescription(pht('The device the service is bound to.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('interfacePHID')
+        ->setType('phid')
+        ->setDescription(pht('The interface the service is bound to.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('disabled')
+        ->setType('bool')
+        ->setDescription(pht('Interface status.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    return array(
+      'servicePHID' => $this->getServicePHID(),
+      'devicePHID' => $this->getDevicePHID(),
+      'interfacePHID' => $this->getInterfacePHID(),
+      'disabled' => (bool)$this->getIsDisabled(),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array(
+      id(new AlmanacPropertiesSearchEngineAttachment())
+        ->setAttachmentKey('properties'),
+    );
+  }
 
 }

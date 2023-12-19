@@ -101,7 +101,7 @@ final class LegalpadDocumentEditor
         LegalpadDocumentRequireSignatureTransaction::TRANSACTIONTYPE,
         pht('Invalid'),
         pht('Only documents with signature type "individual" may '.
-            'require signing to use Phabricator.'),
+            'require signing to log in.'),
         null);
     }
 
@@ -124,12 +124,10 @@ final class LegalpadDocumentEditor
 
   protected function buildMailTemplate(PhabricatorLiskDAO $object) {
     $id = $object->getID();
-    $phid = $object->getPHID();
     $title = $object->getDocumentBody()->getTitle();
 
     return id(new PhabricatorMetaMTAMail())
-      ->setSubject("L{$id}: {$title}")
-      ->addHeader('Thread-Topic', "L{$id}: {$phid}");
+      ->setSubject("L{$id}: {$title}");
   }
 
   protected function getMailTo(PhabricatorLiskDAO $object) {
@@ -168,7 +166,7 @@ final class LegalpadDocumentEditor
   }
 
   protected function getMailSubjectPrefix() {
-    return PhabricatorEnv::getEnvConfig('metamta.legalpad.subject-prefix');
+    return pht('[Legalpad]');
   }
 
 

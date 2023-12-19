@@ -31,7 +31,7 @@ final class ManiphestTaskOwnerTransaction
   }
 
   public function getActionStrength() {
-    return 1.2;
+    return 120;
   }
 
   public function getActionName() {
@@ -112,7 +112,8 @@ final class ManiphestTaskOwnerTransaction
     foreach ($xactions as $xaction) {
       $old = $xaction->getOldValue();
       $new = $xaction->getNewValue();
-      if (!strlen($new)) {
+
+      if (!phutil_nonempty_string($new)) {
         continue;
       }
 
@@ -127,8 +128,7 @@ final class ManiphestTaskOwnerTransaction
 
       if (!$assignee_list) {
         $errors[] = $this->newInvalidError(
-          pht('User "%s" is not a valid user.',
-          $new));
+          pht('User "%s" is not a valid user.', $new));
       }
     }
     return $errors;
@@ -154,5 +154,15 @@ final class ManiphestTaskOwnerTransaction
 
   }
 
+  public function getTransactionTypeForConduit($xaction) {
+    return 'owner';
+  }
+
+  public function getFieldValuesForConduit($xaction, $data) {
+    return array(
+      'old' => $xaction->getOldValue(),
+      'new' => $xaction->getNewValue(),
+    );
+  }
 
 }

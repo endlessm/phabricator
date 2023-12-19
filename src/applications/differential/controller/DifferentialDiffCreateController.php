@@ -27,7 +27,13 @@ final class DifferentialDiffCreateController extends DifferentialController {
     $diff = null;
     // This object is just for policy stuff
     $diff_object = DifferentialDiff::initializeNewDiff($viewer);
-    $repository_phid = null;
+
+    if ($revision) {
+      $repository_phid = $revision->getRepositoryPHID();
+    } else {
+      $repository_phid = null;
+    }
+
     $errors = array();
     $e_diff = null;
     $e_file = null;
@@ -71,7 +77,7 @@ final class DifferentialDiffCreateController extends DifferentialController {
           $uri = $this->getApplicationURI("diff/{$diff_id}/");
           $uri = new PhutilURI($uri);
           if ($revision) {
-            $uri->setQueryParam('revisionID', $revision->getID());
+            $uri->replaceQueryParam('revisionID', $revision->getID());
           }
 
           return id(new AphrontRedirectResponse())->setURI($uri);
@@ -106,13 +112,14 @@ final class DifferentialDiffCreateController extends DifferentialController {
           array(
             array(
               pht(
-                'The best way to create a diff is to use the Arcanist '.
-                'command-line tool.'),
+                'The best way to create a diff is to use the %s '.
+                'command-line tool.',
+                PlatformSymbols::getPlatformClientName()),
               ' ',
               $arcanist_link,
             ),
             pht(
-              'You can also paste a diff below, or upload a file '.
+              'You can also paste a diff above, or upload a file '.
               'containing a diff (for example, from %s, %s or %s).',
               phutil_tag('tt', array(), 'svn diff'),
               phutil_tag('tt', array(), 'git diff'),

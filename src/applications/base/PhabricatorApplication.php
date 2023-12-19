@@ -57,10 +57,6 @@ abstract class PhabricatorApplication
 
   abstract public function getName();
 
-  public function getMenuName() {
-    return $this->getName();
-  }
-
   public function getShortDescription() {
     return pht('%s Application', $this->getName());
   }
@@ -108,7 +104,7 @@ abstract class PhabricatorApplication
    *
    * Launchable applications can be pinned to the home page, and show up in the
    * "Launcher" view of the Applications application. Making an application
-   * unlauncahble prevents pinning and hides it from this view.
+   * unlaunchable prevents pinning and hides it from this view.
    *
    * Usually, an application should be marked unlaunchable if:
    *
@@ -139,10 +135,9 @@ abstract class PhabricatorApplication
 
 
   /**
-   * Returns true if an application is first-party (developed by Phacility)
-   * and false otherwise.
+   * Returns true if an application is first-party and false otherwise.
    *
-   * @return bool True if this application is developed by Phacility.
+   * @return bool True if this application is first-party.
    */
   final public function isFirstParty() {
     $where = id(new ReflectionClass($this))->getFileName();
@@ -494,7 +489,7 @@ abstract class PhabricatorApplication
     return array();
   }
 
-  final private function getCustomPolicySetting($capability) {
+  private function getCustomPolicySetting($capability) {
     if (!$this->isCapabilityEditable($capability)) {
       return null;
     }
@@ -520,7 +515,7 @@ abstract class PhabricatorApplication
   }
 
 
-  final private function getCustomCapabilitySpecification($capability) {
+  private function getCustomCapabilitySpecification($capability) {
     $custom = $this->getCustomCapabilities();
     if (!isset($custom[$capability])) {
       throw new Exception(pht("Unknown capability '%s'!", $capability));
@@ -549,7 +544,7 @@ abstract class PhabricatorApplication
       case PhabricatorPolicyCapability::CAN_VIEW:
         return $this->canUninstall();
       case PhabricatorPolicyCapability::CAN_EDIT:
-        return false;
+        return true;
       default:
         $spec = $this->getCustomCapabilitySpecification($capability);
         return idx($spec, 'edit', true);
@@ -561,7 +556,7 @@ abstract class PhabricatorApplication
       case PhabricatorPolicyCapability::CAN_VIEW:
         if (!$this->canUninstall()) {
           return pht(
-            'This application is required for Phabricator to operate, so all '.
+            'This application is required, so all '.
             'users must have access to it.');
         } else {
           return null;
@@ -618,8 +613,12 @@ abstract class PhabricatorApplication
       ')?';
   }
 
-  protected function getQueryRoutePattern($base = null) {
+  protected function getBulkRoutePattern($base = null) {
     return $base.'(?:query/(?P<queryKey>[^/]+)/)?';
+  }
+
+  protected function getQueryRoutePattern($base = null) {
+    return $base.'(?:query/(?P<queryKey>[^/]+)/(?:(?P<queryAction>[^/]+)/)?)?';
   }
 
   protected function getProfileMenuRouting($controller) {
@@ -649,18 +648,8 @@ abstract class PhabricatorApplication
     return new PhabricatorApplicationEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new PhabricatorApplicationApplicationTransaction();
   }
 
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-
-    return $timeline;
-  }
 }

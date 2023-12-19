@@ -5,7 +5,7 @@ final class PhabricatorEmbedFileRemarkupRule
 
   private $viewer;
 
-  const KEY_EMBED_FILE_PHIDS = 'phabricator.embedded-file-phids';
+  const KEY_ATTACH_INTENT_FILE_PHIDS = 'files.attach-intent';
 
   protected function getObjectNamePrefix() {
     return 'F';
@@ -23,13 +23,44 @@ final class PhabricatorEmbedFileRemarkupRule
           PhabricatorFileThumbnailTransform::TRANSFORM_PREVIEW,
         ))
       ->execute();
+    $objects = mpull($objects, null, 'getID');
 
-    $phids_key = self::KEY_EMBED_FILE_PHIDS;
-    $phids = $engine->getTextMetadata($phids_key, array());
-    foreach (mpull($objects, 'getPHID') as $phid) {
-      $phids[] = $phid;
+
+    // Identify files embedded in the block with "attachment intent", i.e.
+    // those files which the user appears to want to attach to the object.
+    // Files referenced inside quoted blocks are not considered to have this
+    // attachment intent.
+
+    $metadata_key = self::KEY_RULE_OBJECT.'.'.$this->getObjectNamePrefix();
+    $metadata = $engine->getTextMetadata($metadata_key, array());
+
+    $attach_key = self::KEY_ATTACH_INTENT_FILE_PHIDS;
+    $attach_phids = $engine->getTextMetadata($attach_key, array());
+
+    foreach ($metadata as $item) {
+
+      // If this reference was inside a quoted block, don't count it. Quoting
+      // someone else doesn't establish an intent to attach a file.
+      $depth = idx($item, 'quote.depth');
+      if ($depth > 0) {
+        continue;
+      }
+
+      $id = $item['id'];
+      $file = idx($objects, $id);
+
+      if (!$file) {
+        continue;
+      }
+
+      $attach_phids[] = $file->getPHID();
     }
-    $engine->setTextMetadata($phids_key, $phids);
+
+    $attach_phids = array_fuse($attach_phids);
+    $attach_phids = array_keys($attach_phids);
+
+    $engine->setTextMetadata($attach_key, $attach_phids);
+
 
     return $objects;
   }
@@ -144,7 +175,7 @@ final class PhabricatorEmbedFileRemarkupRule
 
           $existing_xform = $file->getTransform($preview_key);
           if ($existing_xform) {
-            $xform_uri = $existing_xform->getCDNURI();
+            $xform_uri = $existing_xform->getCDNURI('data');
           } else {
             $xform_uri = $file->getURIForTransform($xform);
           }
@@ -161,9 +192,16 @@ final class PhabricatorEmbedFileRemarkupRule
       }
     }
 
+    $alt = null;
     if (isset($options['alt'])) {
-      $attrs['alt'] = $options['alt'];
+      $alt = $options['alt'];
     }
+
+    if (!strlen($alt)) {
+      $alt = $file->getAltText();
+    }
+
+    $attrs['alt'] = $alt;
 
     $img = phutil_tag('img', $attrs);
 
@@ -174,9 +212,10 @@ final class PhabricatorEmbedFileRemarkupRule
         'class'       => $image_class,
         'sigil'       => 'lightboxable',
         'meta'        => array(
-          'phid'     => $file->getPHID(),
-          'uri'      => $file->getBestURI(),
-          'dUri'     => $file->getDownloadURI(),
+          'phid' => $file->getPHID(),
+          'uri' => $file->getBestURI(),
+          'dUri' => $file->getDownloadURI(),
+          'alt' => $alt,
           'viewable' => true,
           'monogram' => $file->getMonogram(),
         ),
@@ -260,6 +299,18 @@ final class PhabricatorEmbedFileRemarkupRule
       $autoplay = null;
     }
 
+    if ($is_video) {
+      // See T13135. Chrome refuses to play videos with type "video/quicktime",
+      // even though it may actually be able to play them. The least awful fix
+      // based on available information is to simply omit the "type" attribute
+      // from `<source />` tags. This causes Chrome to try to play the video
+      // and realize it can, and does not appear to produce any bad behavior in
+      // any other browser.
+      $mime_type = null;
+    } else {
+      $mime_type = $file->getMimeType();
+    }
+
     return $this->newTag(
       $tag,
       array(
@@ -274,7 +325,7 @@ final class PhabricatorEmbedFileRemarkupRule
         'source',
         array(
           'src' => $file->getBestURI(),
-          'type' => $file->getMimeType(),
+          'type' => $mime_type,
         )));
   }
 

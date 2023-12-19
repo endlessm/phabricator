@@ -6,12 +6,15 @@ final class DifferentialRevisionAcceptTransaction
   const TRANSACTIONTYPE = 'differential.revision.accept';
   const ACTIONKEY = 'accept';
 
-  protected function getRevisionActionLabel() {
-    return pht("Accept Revision \xE2\x9C\x94");
+  protected function getRevisionActionLabel(
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
+    return pht('Accept Revision');
   }
 
   protected function getRevisionActionDescription(
-    DifferentialRevision $revision) {
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('These changes will be approved.');
   }
 
@@ -162,6 +165,11 @@ final class DifferentialRevisionAcceptTransaction
           'closed. Only open revisions can be accepted.'));
     }
 
+    if ($object->isDraft() || !$object->getShouldBroadcast()) {
+      throw new Exception(
+        pht('You can not accept a draft revision.'));
+    }
+
     $config_key = 'differential.allow-self-accept';
     if (!PhabricatorEnv::getEnvConfig($config_key)) {
       if ($this->isViewerRevisionAuthor($object, $viewer)) {
@@ -227,6 +235,14 @@ final class DifferentialRevisionAcceptTransaction
       '%s accepted %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'accept';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

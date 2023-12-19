@@ -61,7 +61,7 @@ final class PhabricatorRepositoryManagementClusterizeWorkflow
           array(
             AlmanacClusterRepositoryServiceType::SERVICETYPE,
           ))
-        ->needBindings(true)
+        ->needActiveBindings(true)
         ->executeOne();
       if (!$service) {
         throw new PhutilArgumentUsageException(
@@ -117,7 +117,8 @@ final class PhabricatorRepositoryManagementClusterizeWorkflow
       $xactions = array();
 
       $xactions[] = id(new PhabricatorRepositoryTransaction())
-        ->setTransactionType(PhabricatorRepositoryTransaction::TYPE_SERVICE)
+        ->setTransactionType(
+          PhabricatorRepositoryServiceTransaction::TRANSACTIONTYPE)
         ->setNewValue($service_phid);
 
       id(new PhabricatorRepositoryEditor())

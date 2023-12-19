@@ -19,6 +19,7 @@ final class PhabricatorRepositoryRefCursor
   protected $refNameHash;
   protected $refNameRaw;
   protected $refNameEncoding;
+  protected $isPermanent;
 
   private $repository = self::ATTACHABLE;
   private $positions = self::ATTACHABLE;
@@ -34,6 +35,7 @@ final class PhabricatorRepositoryRefCursor
         'refType' => 'text32',
         'refNameHash' => 'bytes12',
         'refNameEncoding' => 'text16?',
+        'isPermanent' => 'bool',
       ),
       self::CONFIG_KEY_SCHEMA => array(
         'key_ref' => array(
@@ -84,6 +86,12 @@ final class PhabricatorRepositoryRefCursor
 
   public function getPositionIdentifiers() {
     return mpull($this->getPositions(), 'getCommitIdentifier');
+  }
+
+  public function newDiffusionRepositoryRef() {
+    return id(new DiffusionRepositoryRef())
+      ->setRefType($this->getRefType())
+      ->setShortName($this->getRefName());
   }
 
 

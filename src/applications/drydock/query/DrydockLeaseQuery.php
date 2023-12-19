@@ -5,9 +5,12 @@ final class DrydockLeaseQuery extends DrydockQuery {
   private $ids;
   private $phids;
   private $resourcePHIDs;
+  private $ownerPHIDs;
   private $statuses;
   private $datasourceQuery;
   private $needUnconsumedCommands;
+  private $minModified;
+  private $maxModified;
 
   public function withIDs(array $ids) {
     $this->ids = $ids;
@@ -24,6 +27,11 @@ final class DrydockLeaseQuery extends DrydockQuery {
     return $this;
   }
 
+  public function withOwnerPHIDs(array $phids) {
+    $this->ownerPHIDs = $phids;
+    return $this;
+  }
+
   public function withStatuses(array $statuses) {
     $this->statuses = $statuses;
     return $this;
@@ -34,6 +42,12 @@ final class DrydockLeaseQuery extends DrydockQuery {
     return $this;
   }
 
+  public function withDateModifiedBetween($min_epoch, $max_epoch) {
+    $this->minModified = $min_epoch;
+    $this->maxModified = $max_epoch;
+    return $this;
+  }
+
   public function needUnconsumedCommands($need) {
     $this->needUnconsumedCommands = $need;
     return $this;
@@ -41,10 +55,6 @@ final class DrydockLeaseQuery extends DrydockQuery {
 
   public function newResultObject() {
     return new DrydockLease();
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
   }
 
   protected function willFilterPage(array $leases) {
@@ -105,6 +115,13 @@ final class DrydockLeaseQuery extends DrydockQuery {
         $this->resourcePHIDs);
     }
 
+    if ($this->ownerPHIDs !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'ownerPHID IN (%Ls)',
+        $this->ownerPHIDs);
+    }
+
     if ($this->ids !== null) {
       $where[] = qsprintf(
         $conn,
@@ -131,6 +148,20 @@ final class DrydockLeaseQuery extends DrydockQuery {
         $conn,
         'id = %d',
         (int)$this->datasourceQuery);
+    }
+
+    if ($this->minModified !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateModified >= %d',
+        $this->minModified);
+    }
+
+    if ($this->maxModified !== null) {
+      $where[] = qsprintf(
+        $conn,
+        'dateModified <= %d',
+        $this->maxModified);
     }
 
     return $where;

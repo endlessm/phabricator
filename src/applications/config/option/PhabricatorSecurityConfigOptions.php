@@ -67,7 +67,7 @@ EOTEXT
       PhabricatorEnv::getDoclink('Configuring Encryption')));
 
     $require_mfa_description = $this->deformat(pht(<<<EOTEXT
-By default, Phabricator allows users to add multi-factor authentication to
+By default, this software allows users to add multi-factor authentication to
 their accounts, but does not require it. By enabling this option, you can
 force all users to add at least one authentication factor before they can use
 their accounts.
@@ -87,7 +87,7 @@ EOTEXT
         ->setSummary(pht('Alternate domain to serve files from.'))
         ->setDescription(
           pht(
-            'By default, Phabricator serves files from the same domain '.
+            'By default, this software serves files from the same domain '.
             'the application is served from. This is convenient, but '.
             'presents a security risk.'.
             "\n\n".
@@ -119,7 +119,7 @@ EOTEXT
           pht(
             "If the web server responds to both HTTP and HTTPS requests but ".
             "you want users to connect with only HTTPS, you can set this ".
-            "to `true` to make Phabricator redirect HTTP requests to HTTPS.".
+            "to `true` to make this service redirect HTTP requests to HTTPS.".
             "\n\n".
             "Normally, you should just configure your server not to accept ".
             "HTTP traffic, but this setting may be useful if you originally ".
@@ -128,15 +128,14 @@ EOTEXT
             "balancer which terminates HTTPS connections and you can not ".
             "reasonably configure more granular behavior there.".
             "\n\n".
-            "IMPORTANT: Phabricator determines if a request is HTTPS or not ".
-            "by examining the PHP `%s` variable. If you run ".
-            "Apache/mod_php this will probably be set correctly for you ".
-            "automatically, but if you run Phabricator as CGI/FCGI (e.g., ".
-            "through nginx or lighttpd), you need to configure your web ".
-            "server so that it passes the value correctly based on the ".
-            "connection type.".
+            "IMPORTANT: A request is identified as HTTP or HTTPS by examining ".
+            "the PHP `%s` variable. If you run Apache/mod_php this will ".
+            "probably be set correctly for you automatically, but if you run ".
+            "as CGI/FCGI (e.g., through nginx or lighttpd), you need to ".
+            "configure your web server so that it passes the value correctly ".
+            "based on the connection type.".
             "\n\n".
-            "If you configure Phabricator in cluster mode, note that this ".
+            "If you configure clustering, note that this ".
             "setting is ignored by intracluster requests.",
             "\$_SERVER['HTTPS']"))
         ->setBoolOptions(
@@ -154,35 +153,6 @@ EOTEXT
             pht('Multi-Factor Required'),
             pht('Multi-Factor Optional'),
           )),
-      $this->newOption(
-        'phabricator.csrf-key',
-        'string',
-        '0b7ec0592e0a2829d8b71df2fa269b2c6172eca3')
-        ->setHidden(true)
-        ->setSummary(
-          pht('Hashed with other inputs to generate CSRF tokens.'))
-        ->setDescription(
-          pht(
-            'This is hashed with other inputs to generate CSRF tokens. If '.
-            'you want, you can change it to some other string which is '.
-            'unique to your install. This will make your install more secure '.
-            'in a vague, mostly theoretical way. But it will take you like 3 '.
-            'seconds of mashing on your keyboard to set it up so you might '.
-            'as well.')),
-       $this->newOption(
-         'phabricator.mail-key',
-         'string',
-         '5ce3e7e8787f6e40dfae861da315a5cdf1018f12')
-        ->setHidden(true)
-        ->setSummary(
-          pht('Hashed with other inputs to generate mail tokens.'))
-        ->setDescription(
-          pht(
-            "This is hashed with other inputs to generate mail tokens. If ".
-            "you want, you can change it to some other string which is ".
-            "unique to your install. In particular, you will want to do ".
-            "this if you accidentally send a bunch of mail somewhere you ".
-            "shouldn't have, to invalidate all old reply-to addresses.")),
        $this->newOption(
         'uri.allowed-protocols',
         'set',
@@ -192,14 +162,26 @@ EOTEXT
           'mailto' => true,
         ))
         ->setSummary(
-          pht('Determines which URI protocols are auto-linked.'))
+          pht(
+            'Determines which URI protocols are valid for links and '.
+            'redirects.'))
         ->setDescription(
           pht(
-            "When users write comments which have URIs, they'll be ".
-            "automatically linked if the protocol appears in this set. This ".
-            "whitelist is primarily to prevent security issues like ".
-            "%s URIs.",
-            'javascript://'))
+            'When users write comments which have URIs, they will be '.
+            'automatically turned into clickable links if the URI protocol '.
+            'appears in this set.'.
+            "\n\n".
+            'This set of allowed protocols is primarily intended to prevent '.
+            'security issues with "javascript:" and other potentially '.
+            'dangerous URI handlers.'.
+            "\n\n".
+            'This set is also used to enforce valid redirect URIs. '.
+            'This service will refuse to issue a HTTP "Location" redirect '.
+            'to a URI with a protocol not on this set.'.
+            "\n\n".
+            'Usually, "http" and "https" should be present in this set. If '.
+            'you remove one or both protocols, some features which rely on '.
+            'links or redirects may not work.'))
         ->addExample("http\nhttps", pht('Valid Setting'))
         ->setLocked(true),
       $this->newOption(
@@ -227,6 +209,12 @@ EOTEXT
           // This isn't a standard handler installed by an application, but
           // is a reasonable name for a user-installed handler.
           'editor' => true,
+
+          // This handler is for Visual Studio Code.
+          'vscode' => true,
+
+          // This is for IntelliJ IDEA.
+          'idea' => true,
         ))
         ->setSummary(pht('Whitelists editor protocols for "Open in Editor".'))
         ->setDescription(
@@ -234,21 +222,6 @@ EOTEXT
             'Users can configure a URI pattern to open files in a text '.
             'editor. The URI must use a protocol on this whitelist.'))
         ->setLocked(true),
-       $this->newOption(
-         'celerity.resource-hash',
-         'string',
-         'd9455ea150622ee044f7931dabfa52aa')
-        ->setSummary(
-          pht('An input to the hash function when building resource hashes.'))
-        ->setDescription(
-          pht(
-            'This value is an input to the hash function when building '.
-            'resource hashes. It has no security value, but if you '.
-            'accidentally poison user caches (by pushing a bad patch or '.
-            'having something go wrong with a CDN, e.g.) you can change this '.
-            'to something else and rebuild the Celerity map to break user '.
-            'caches. Unless you are doing Celerity development, it is '.
-            'exceptionally unlikely that you need to modify this.')),
        $this->newOption('remarkup.enable-embedded-youtube', 'bool', false)
         ->setBoolOptions(
           array(
@@ -274,10 +247,9 @@ EOTEXT
               'requests.'))
           ->setDescription(
             pht(
-              'Phabricator users can make requests to other services from '.
-              'the Phabricator host in some circumstances (for example, by '.
-              'creating a repository with a remote URL or having Phabricator '.
-              'fetch an image from a remote server).'.
+              'Users can make requests to other services from '.
+              'service hosts in some circumstances (for example, by '.
+              'creating a repository with a remote URL).'.
               "\n\n".
               'This may represent a security vulnerability if services on '.
               'the same subnet will accept commands or reveal private '.
@@ -285,8 +257,8 @@ EOTEXT
               'IP address. In particular, all hosts in EC2 have access to '.
               'such a service.'.
               "\n\n".
-              'This option defines a list of netblocks which Phabricator '.
-              'will decline to connect to. Generally, you should list all '.
+              'This option defines a list of netblocks which requests will '.
+              'never be issued to. Generally, you should list all '.
               'private IP space here.'))
           ->addExample(array('0.0.0.0/0'), pht('No Outbound Requests')),
         $this->newOption('security.strict-transport-security', 'bool', false)
@@ -352,11 +324,11 @@ EOTEXT
         throw new PhabricatorConfigValidationException(
           pht(
             "Config option '%s' is invalid. The URI must NOT have a path, ".
-            "e.g. '%s' is OK, but '%s' is not. Phabricator must be installed ".
-            "on an entire domain; it can not be installed on a path.",
+            "e.g. '%s' is OK, but '%s' is not. This software must be ".
+            "installed on an entire domain; it can not be installed on a path.",
             $key,
-            'http://phabricator.example.com/',
-            'http://example.com/phabricator/'));
+            'http://devtools.example.com/',
+            'http://example.com/devtools/'));
       }
     }
   }

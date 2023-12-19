@@ -25,6 +25,7 @@ final class DrydockRepositoryOperation extends DrydockDAO
   private $repository = self::ATTACHABLE;
   private $object = self::ATTACHABLE;
   private $implementation = self::ATTACHABLE;
+  private $workingCopyLease = self::ATTACHABLE;
 
   public static function initializeNewOperation(
     DrydockRepositoryOperationType $op) {
@@ -53,6 +54,12 @@ final class DrydockRepositoryOperation extends DrydockDAO
         ),
         'key_repository' => array(
           'columns' => array('repositoryPHID', 'operationState'),
+        ),
+        'key_state' => array(
+          'columns' => array('operationState'),
+        ),
+        'key_author' => array(
+          'columns' => array('authorPHID', 'operationState'),
         ),
       ),
     ) + parent::getConfiguration();
@@ -90,6 +97,19 @@ final class DrydockRepositoryOperation extends DrydockDAO
     return $this->implementation;
   }
 
+  public function getWorkingCopyLease() {
+    return $this->assertAttached($this->workingCopyLease);
+  }
+
+  public function attachWorkingCopyLease(DrydockLease $lease) {
+    $this->workingCopyLease = $lease;
+    return $this;
+  }
+
+  public function hasWorkingCopyLease() {
+    return ($this->workingCopyLease !== self::ATTACHABLE);
+  }
+
   public function getProperty($key, $default = null) {
     return idx($this->properties, $key, $default);
   }
@@ -97,6 +117,15 @@ final class DrydockRepositoryOperation extends DrydockDAO
   public function setProperty($key, $value) {
     $this->properties[$key] = $value;
     return $this;
+  }
+
+  public static function getOperationStateNameMap() {
+    return array(
+      self::STATE_WAIT => pht('Waiting'),
+      self::STATE_WORK => pht('Working'),
+      self::STATE_DONE => pht('Done'),
+      self::STATE_FAIL => pht('Failed'),
+    );
   }
 
   public static function getOperationStateIcon($state) {
@@ -111,13 +140,7 @@ final class DrydockRepositoryOperation extends DrydockDAO
   }
 
   public static function getOperationStateName($state) {
-    $map = array(
-      self::STATE_WAIT => pht('Waiting'),
-      self::STATE_WORK => pht('Working'),
-      self::STATE_DONE => pht('Done'),
-      self::STATE_FAIL => pht('Failed'),
-    );
-
+    $map = self::getOperationStateNameMap();
     return idx($map, $state, pht('<Unknown: %s>', $state));
   }
 
@@ -134,9 +157,9 @@ final class DrydockRepositoryOperation extends DrydockDAO
   }
 
   public function applyOperation(DrydockInterface $interface) {
-    return $this->getImplementation()->applyOperation(
-      $this,
-      $interface);
+    $impl = $this->getImplementation();
+    $impl->setInterface($interface);
+    return $impl->applyOperation($this, $interface);
   }
 
   public function getOperationDescription(PhabricatorUser $viewer) {
@@ -186,6 +209,37 @@ final class DrydockRepositoryOperation extends DrydockDAO
     return $this->getProperty('exec.workingcopy.error');
   }
 
+  public function logText($text) {
+    return $this->logEvent(
+      DrydockTextLogType::LOGCONST,
+      array(
+        'text' => $text,
+      ));
+  }
+
+  public function logEvent($type, array $data = array()) {
+    $log = id(new DrydockLog())
+      ->setEpoch(PhabricatorTime::getNow())
+      ->setType($type)
+      ->setData($data);
+
+    $log->setOperationPHID($this->getPHID());
+
+    if ($this->hasWorkingCopyLease()) {
+      $lease = $this->getWorkingCopyLease();
+      $log->setLeasePHID($lease->getPHID());
+
+      $resource_phid = $lease->getResourcePHID();
+      if ($resource_phid) {
+        $resource = $lease->getResource();
+
+        $log->setResourcePHID($resource->getPHID());
+        $log->setBlueprintPHID($resource->getBlueprintPHID());
+      }
+    }
+
+    return $log->save();
+  }
 
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */

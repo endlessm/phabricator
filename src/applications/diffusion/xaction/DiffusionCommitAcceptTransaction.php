@@ -7,7 +7,7 @@ final class DiffusionCommitAcceptTransaction
   const ACTIONKEY = 'accept';
 
   protected function getCommitActionLabel() {
-    return pht("Accept Commit \xE2\x9C\x94");
+    return pht('Accept Commit');
   }
 
   protected function getCommitActionDescription() {
@@ -31,7 +31,7 @@ final class DiffusionCommitAcceptTransaction
   }
 
   public function applyExternalEffects($object, $value) {
-    $status = PhabricatorAuditStatusConstants::ACCEPTED;
+    $status = PhabricatorAuditRequestStatus::ACCEPTED;
     $actor = $this->getActor();
     $this->applyAuditorEffect($object, $actor, $value, $status);
   }
@@ -68,6 +68,14 @@ final class DiffusionCommitAcceptTransaction
       '%s accepted %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'accept';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

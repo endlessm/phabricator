@@ -24,6 +24,7 @@ final class PHUITagView extends AphrontTagView {
   const COLOR_BLUEGREY      = 'bluegrey';
   const COLOR_CHECKERED     = 'checkered';
   const COLOR_DISABLED      = 'disabled';
+  const COLOR_PLACEHOLDER = 'placeholder';
 
   const COLOR_OBJECT        = 'object';
   const COLOR_PERSON        = 'person';
@@ -43,6 +44,8 @@ final class PHUITagView extends AphrontTagView {
   private $shade;
   private $slimShady;
   private $border;
+  private $contextObject;
+  private $isExiled;
 
   public function setType($type) {
     $this->type = $type;
@@ -117,13 +120,31 @@ final class PHUITagView extends AphrontTagView {
     return $this;
   }
 
-  public function setSlimShady($mm) {
-    $this->slimShady = $mm;
+  public function setSlimShady($is_eminem) {
+    $this->slimShady = $is_eminem;
     return $this;
   }
 
   protected function getTagName() {
     return strlen($this->href) ? 'a' : 'span';
+  }
+
+  public function setContextObject($context_object) {
+    $this->contextObject = $context_object;
+    return $this;
+  }
+
+  public function getContextObject() {
+    return $this->contextObject;
+  }
+
+  public function setIsExiled($is_exiled) {
+    $this->isExiled = $is_exiled;
+    return $this;
+  }
+
+  public function getIsExiled() {
+    return $this->isExiled;
   }
 
   protected function getTagAttributes() {
@@ -154,25 +175,43 @@ final class PHUITagView extends AphrontTagView {
       $classes[] = 'phui-tag-'.$this->border;
     }
 
-    if ($this->phid) {
-      Javelin::initBehavior('phui-hovercards');
+    if ($this->getIsExiled()) {
+      $classes[] = 'phui-tag-exiled';
+    }
 
-      $attributes = array(
-        'href'  => $this->href,
-        'sigil' => 'hovercard',
-        'meta'  => array(
-          'hoverPHID' => $this->phid,
-        ),
-        'target' => $this->external ? '_blank' : null,
-      );
-    } else {
-      $attributes = array(
-        'href'  => $this->href,
-        'target' => $this->external ? '_blank' : null,
+    $attributes = array(
+      'href' => $this->href,
+      'class' => $classes,
+    );
+
+    if ($this->external) {
+      $attributes += array(
+        'target' => '_blank',
+        'rel' => 'noreferrer',
       );
     }
 
-    return $attributes + array('class' => $classes);
+    if ($this->phid) {
+      Javelin::initBehavior('phui-hovercards');
+
+      $hovercard_spec = array(
+        'objectPHID' => $this->phid,
+      );
+
+      $context_object = $this->getContextObject();
+      if ($context_object) {
+        $hovercard_spec['contextPHID'] = $context_object->getPHID();
+      }
+
+      $attributes += array(
+        'sigil' => 'hovercard',
+        'meta' => array(
+          'hovercardSpec' => $hovercard_spec,
+        ),
+      );
+    }
+
+    return $attributes;
   }
 
   protected function getTagContent() {

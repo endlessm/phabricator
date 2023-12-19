@@ -34,7 +34,7 @@
   vertical-align: middle;
 }
 
-body .phui-header-shell.phui-header-no-backgound {
+body .phui-header-shell.phui-header-no-background {
   background-color: transparent;
   border: none;
 }
@@ -203,6 +203,7 @@ body .phui-header-shell.phui-bleed-header
   margin-right: 8px;
   -webkit-font-smoothing: auto;
   border-color: transparent;
+  line-height: 28px;
 }
 
 
@@ -211,33 +212,6 @@ body .phui-header-shell.phui-bleed-header
   border: none;
   font-weight: normal;
   -webkit-font-smoothing: auto;
-}
-
-.policy-header-callout.policy-adjusted-weaker {
-  background: {$sh-greenbackground};
-}
-
-.policy-header-callout.policy-adjusted-weaker .policy-link,
-.policy-header-callout.policy-adjusted-weaker .phui-icon-view {
-  color: {$sh-greentext};
-}
-
-.policy-header-callout.policy-adjusted-stronger {
-  background: {$sh-redbackground};
-}
-
-.policy-header-callout.policy-adjusted-stronger .policy-link,
-.policy-header-callout.policy-adjusted-stronger .phui-icon-view {
-  color: {$sh-redtext};
-}
-
-.policy-header-callout.policy-adjusted-different {
-  background: {$sh-orangebackground};
-}
-
-.policy-header-callout.policy-adjusted-different .policy-link,
-.policy-header-callout.policy-adjusted-different .phui-icon-view {
-  color: {$sh-orangetext};
 }
 
 .policy-header-callout.policy-adjusted-special {
@@ -249,6 +223,16 @@ body .phui-header-shell.phui-bleed-header
   color: {$sh-indigotext};
 }
 
+.policy-header-callout.policy-adjusted-locked {
+  background: {$sh-pinkbackground};
+}
+
+.policy-header-callout.policy-adjusted-locked .policy-link,
+.policy-header-callout.policy-adjusted-locked .phui-icon-view {
+  color: {$sh-pinktext};
+}
+
+
 .policy-header-callout .policy-space-container {
   font-weight: bold;
   color: {$sh-redtext};
@@ -258,7 +242,6 @@ body .phui-header-shell.phui-bleed-header
   padding: 0 0 0 4px;
   color: {$lightgreytext};
 }
-
 
 .phui-header-action-links .phui-mobile-menu {
   display: none;
@@ -294,7 +277,8 @@ body .phui-header-shell.phui-bleed-header
 }
 
 .spaces-name .phui-handle,
-.spaces-name a.phui-handle {
+.spaces-name a.phui-handle,
+.phui-profile-header.phui-header-shell .spaces-name .phui-handle {
   color: {$sh-redtext};
 }
 
@@ -343,46 +327,4 @@ body .phui-header-shell.phui-bleed-header
 
 .phui-header-view .phui-tag-indigo a {
   color: {$sh-indigotext};
-}
-
-.phui-policy-section-view {
-  margin-bottom: 24px;
-}
-
-.phui-policy-section-view-header {
-  background: {$bluebackground};
-  border-bottom: 1px solid {$lightblueborder};
-  padding: 4px 8px;
-  color: {$darkbluetext};
-  margin-bottom: 8px;
-}
-
-.phui-policy-section-view-header-text {
-  font-weight: bold;
-}
-
-.phui-policy-section-view-header .phui-icon-view {
-  margin-right: 8px;
-}
-
-.phui-policy-section-view-link {
-  float: right;
-}
-
-.phui-policy-section-view-link .phui-icon-view {
-  color: {$bluetext};
-}
-
-.phui-policy-section-view-hint {
-  color: {$greytext};
-  background: {$lightbluebackground};
-  padding: 8px;
-}
-
-.phui-policy-section-view-body {
-  padding: 0 12px;
-}
-
-.phui-policy-section-view-inactive-rule {
-  color: {$greytext};
 }

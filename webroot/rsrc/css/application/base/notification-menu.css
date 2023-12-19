@@ -15,6 +15,7 @@
 
 .phabricator-notification {
   padding: 8px 12px;
+  color: {$darkgreytext};
 }
 
 .phabricator-notification-menu-loading {
@@ -68,6 +69,10 @@
   color: {$lightgreytext};
 }
 
+.phabricator-notification-warning {
+  background: {$sh-yellowbackground};
+}
+
 .phabricator-notification-list .phabricator-notification-unread,
 .phabricator-notification-menu .phabricator-notification-unread {
   background: {$hoverblue};
@@ -95,7 +100,7 @@
 .phabricator-notification-unread .phabricator-notification-foot
   .phabricator-notification-status {
     font-size: 7px;
-    color: {$lightgreytext};
+    color: {$lightbluetext};
     position: absolute;
     display: inline-block;
     top: 6px;
@@ -110,7 +115,7 @@
 }
 
 .phabricator-notification-header a {
-  color: {$darkgreytext};
+  color: {$anchor};
 }
 
 .phabricator-notification-header a:hover {
@@ -157,4 +162,9 @@
 
 .aphlict-connection-status .connection-status-text {
   margin-left: 12px;
+}
+
+.phabricator-notification .phui-timeline-value {
+  font-style: italic;
+  color: #000;
 }

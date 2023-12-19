@@ -2,28 +2,8 @@
 
 final class PhabricatorPasteViewController extends PhabricatorPasteController {
 
-  private $highlightMap;
-
   public function shouldAllowPublic() {
     return true;
-  }
-
-  public function willProcessRequest(array $data) {
-    $raw_lines = idx($data, 'lines');
-    $map = array();
-    if ($raw_lines) {
-      $lines = explode('-', $raw_lines);
-      $first = idx($lines, 0, 0);
-      $last = idx($lines, 1);
-      if ($last) {
-        $min = min($first, $last);
-        $max = max($first, $last);
-        $map = array_fuse(range($min, $max));
-      } else {
-        $map[$first] = $first;
-      }
-    }
-    $this->highlightMap = $map;
   }
 
   public function handleRequest(AphrontRequest $request) {
@@ -40,11 +20,18 @@ final class PhabricatorPasteViewController extends PhabricatorPasteController {
       return new Aphront404Response();
     }
 
+    $lines = $request->getURILineRange('lines', 1000);
+    if ($lines) {
+      $map = range($lines[0], $lines[1]);
+    } else {
+      $map = array();
+    }
+
     $header = $this->buildHeaderView($paste);
     $curtain = $this->buildCurtain($paste);
 
     $subheader = $this->buildSubheaderView($paste);
-    $source_code = $this->buildSourceCodeView($paste, $this->highlightMap);
+    $source_code = $this->buildSourceCodeView($paste, $map);
 
     require_celerity_resource('paste-css');
 
@@ -64,16 +51,19 @@ final class PhabricatorPasteViewController extends PhabricatorPasteController {
     $timeline->setQuoteRef($monogram);
     $comment_view->setTransactionTimeline($timeline);
 
+    $recommendation_view = $this->newDocumentRecommendationView($paste);
+
     $paste_view = id(new PHUITwoColumnView())
       ->setHeader($header)
       ->setSubheader($subheader)
-      ->setMainColumn(array(
+      ->setMainColumn(
+        array(
+          $recommendation_view,
           $source_code,
           $timeline,
           $comment_view,
         ))
-      ->setCurtain($curtain)
-      ->addClass('ponder-question-view');
+      ->setCurtain($curtain);
 
     return $this->newPage()
       ->setTitle($paste->getFullName())
@@ -181,6 +171,60 @@ final class PhabricatorPasteViewController extends PhabricatorPasteController {
       ->setImage($image_uri)
       ->setImageHref($image_href)
       ->setContent($content);
+  }
+
+  private function newDocumentRecommendationView(PhabricatorPaste $paste) {
+    $viewer = $this->getViewer();
+
+    // See PHI1703. If a viewer is looking at a document in Paste which has
+    // a good rendering via a DocumentEngine, suggest they view the content
+    // in Files instead so they can see it rendered.
+
+    $ref = id(new PhabricatorDocumentRef())
+      ->setName($paste->getTitle())
+      ->setData($paste->getRawContent());
+
+    $engines = PhabricatorDocumentEngine::getEnginesForRef($viewer, $ref);
+    if (!$engines) {
+      return null;
+    }
+
+    $engine = head($engines);
+    if (!$engine->shouldSuggestEngine($ref)) {
+      return null;
+    }
+
+    $file = id(new PhabricatorFileQuery())
+      ->setViewer($viewer)
+      ->withPHIDs(array($paste->getFilePHID()))
+      ->executeOne();
+    if (!$file) {
+      return null;
+    }
+
+    $file_ref = id(new PhabricatorDocumentRef())
+      ->setFile($file);
+
+    $view_uri = id(new PhabricatorFileDocumentRenderingEngine())
+      ->getRefViewURI($file_ref, $engine);
+
+    $view_as_label = $engine->getViewAsLabel($file_ref);
+
+    $view_as_hint = pht(
+      'This content can be rendered as a document in Files.');
+
+    return id(new PHUIInfoView())
+      ->setSeverity(PHUIInfoView::SEVERITY_NOTICE)
+      ->addButton(
+        id(new PHUIButtonView())
+          ->setTag('a')
+          ->setText($view_as_label)
+          ->setHref($view_uri)
+          ->setColor('grey'))
+      ->setErrors(
+        array(
+          $view_as_hint,
+        ));
   }
 
 }

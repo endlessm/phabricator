@@ -33,8 +33,9 @@ final class DiffusionLastModifiedQueryConduitAPIMethod
         continue;
       }
       list($hash) = $repository->execxLocalCommand(
-        'log -n1 --format=%%H %s -- %s',
-        $commit,
+        'log -n1 %s %s -- %s',
+        '--format=%H',
+        gitsprintf('%s', $commit),
         $path);
       $results[$path] = trim($hash);
     }
@@ -115,6 +116,10 @@ final class DiffusionLastModifiedQueryConduitAPIMethod
     $graph_cache = new PhabricatorRepositoryGraphCache();
 
     $results = array();
+
+    // Spend no more than this many total seconds trying to satisfy queries
+    // via the graph cache.
+    $remaining_time = 10.0;
     foreach ($map as $path => $commit) {
       $path_id = idx($path_map, $path);
       if (!$path_id) {
@@ -125,12 +130,20 @@ final class DiffusionLastModifiedQueryConduitAPIMethod
         continue;
       }
 
+      $t_start = microtime(true);
       $cache_result = $graph_cache->loadLastModifiedCommitID(
         $commit_id,
-        $path_id);
+        $path_id,
+        $remaining_time);
+      $t_end = microtime(true);
 
       if ($cache_result !== false) {
         $results[$path] = $cache_result;
+      }
+
+      $remaining_time -= ($t_end - $t_start);
+      if ($remaining_time <= 0) {
+        break;
       }
     }
 

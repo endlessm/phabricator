@@ -50,17 +50,6 @@ final class PhabricatorPhurlURLQuery
     return $this;
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $url = $this->loadCursorObject($cursor);
-    return array(
-      'id' => $url->getID(),
-    );
-  }
-
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
-  }
-
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
     $where = parent::buildWhereClauseParts($conn);
 

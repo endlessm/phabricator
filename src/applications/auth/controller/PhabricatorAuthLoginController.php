@@ -17,6 +17,7 @@ final class PhabricatorAuthLoginController
     if ($parameter_name == 'code') {
       return true;
     }
+
     return parent::shouldAllowRestrictedParameter($parameter_name);
   }
 
@@ -34,6 +35,7 @@ final class PhabricatorAuthLoginController
       return $response;
     }
 
+    $invite = $this->loadInvite();
     $provider = $this->provider;
 
     try {
@@ -78,9 +80,9 @@ final class PhabricatorAuthLoginController
         } else {
           return $this->renderError(
             pht(
-              'The external account ("%s") you just authenticated with is '.
-              'not configured to allow logins on this Phabricator install. '.
-              'An administrator may have recently disabled it.',
+              'The external service ("%s") you just authenticated with is '.
+              'not configured to allow logins on this server. An '.
+              'administrator may have recently disabled it.',
               $provider->getProviderName()));
         }
       } else if ($viewer->getPHID() == $account->getUserPHID()) {
@@ -92,45 +94,56 @@ final class PhabricatorAuthLoginController
       } else {
         return $this->renderError(
           pht(
-            'The external account ("%s") you just used to log in is already '.
-            'associated with another Phabricator user account. Log in to the '.
-            'other Phabricator account and unlink the external account before '.
-            'linking it to a new Phabricator account.',
-            $provider->getProviderName()));
+            'The external service ("%s") you just used to log in is already '.
+            'associated with another %s user account. Log in to the '.
+            'other %s account and unlink the external account before '.
+            'linking it to a new %s account.',
+            $provider->getProviderName(),
+            PlatformSymbols::getPlatformServerName(),
+            PlatformSymbols::getPlatformServerName(),
+            PlatformSymbols::getPlatformServerName()));
       }
     } else {
       // The account is not yet attached to a Phabricator user, so this is
       // either a registration or an account link request.
       if (!$viewer->isLoggedIn()) {
-        if ($provider->shouldAllowRegistration()) {
+        if ($provider->shouldAllowRegistration() || $invite) {
           return $this->processRegisterUser($account);
         } else {
           return $this->renderError(
             pht(
-              'The external account ("%s") you just authenticated with is '.
-              'not configured to allow registration on this Phabricator '.
-              'install. An administrator may have recently disabled it.',
+              'The external service ("%s") you just authenticated with is '.
+              'not configured to allow registration on this server. An '.
+              'administrator may have recently disabled it.',
               $provider->getProviderName()));
         }
       } else {
 
-        // If the user already has a linked account of this type, prevent them
-        // from linking a second account. This can happen if they swap logins
-        // and then refresh the account link. See T6707. We will eventually
-        // allow this after T2549.
+        // If the user already has a linked account on this provider, prevent
+        // them from linking a second account. This can happen if they swap
+        // logins and then refresh the account link.
+
+        // There's no technical reason we can't allow you to link multiple
+        // accounts from a single provider; disallowing this is currently a
+        // product deciison. See T2549.
+
         $existing_accounts = id(new PhabricatorExternalAccountQuery())
           ->setViewer($viewer)
           ->withUserPHIDs(array($viewer->getPHID()))
-          ->withAccountTypes(array($account->getAccountType()))
+          ->withProviderConfigPHIDs(
+            array(
+              $provider->getProviderConfigPHID(),
+            ))
           ->execute();
         if ($existing_accounts) {
           return $this->renderError(
             pht(
-              'Your Phabricator account is already connected to an external '.
-              'account on this provider ("%s"), but you are currently logged '.
-              'in to the provider with a different account. Log out of the '.
+              'Your %s account is already connected to an external '.
+              'account on this service ("%s"), but you are currently logged '.
+              'in to the service with a different account. Log out of the '.
               'external service, then log back in with the correct account '.
               'before refreshing the account link.',
+              PlatformSymbols::getPlatformServerName(),
               $provider->getProviderName()));
         }
 
@@ -139,9 +152,9 @@ final class PhabricatorAuthLoginController
         } else {
           return $this->renderError(
             pht(
-              'The external account ("%s") you just authenticated with is '.
-              'not configured to allow account linking on this Phabricator '.
-              'install. An administrator may have recently disabled it.',
+              'The external service ("%s") you just authenticated with is '.
+              'not configured to allow account linking on this server. An '.
+              'administrator may have recently disabled it.',
               $provider->getProviderName()));
         }
       }
@@ -160,7 +173,8 @@ final class PhabricatorAuthLoginController
       return $this->renderError(
         pht(
           'The external account you just logged in with is not associated '.
-          'with a valid Phabricator user.'));
+          'with a valid %s user account.',
+          PlatformSymbols::getPlatformServerName()));
     }
 
     return $this->loginUser($user);
@@ -236,18 +250,24 @@ final class PhabricatorAuthLoginController
     $content) {
 
     $crumbs = $this->buildApplicationCrumbs();
+    $viewer = $this->getViewer();
 
-    if ($this->getRequest()->getUser()->isLoggedIn()) {
+    if ($viewer->isLoggedIn()) {
       $crumbs->addTextCrumb(pht('Link Account'), $provider->getSettingsURI());
     } else {
-      $crumbs->addTextCrumb(pht('Log In'), $this->getApplicationURI('start/'));
+      $crumbs->addTextCrumb(pht('Login'), $this->getApplicationURI('start/'));
+
+      $content = array(
+        $this->newCustomStartMessage(),
+        $content,
+      );
     }
 
     $crumbs->addTextCrumb($provider->getProviderName());
     $crumbs->setBorder(true);
 
     return $this->newPage()
-      ->setTitle(pht('Log In'))
+      ->setTitle(pht('Login'))
       ->setCrumbs($crumbs)
       ->appendChild($content);
   }

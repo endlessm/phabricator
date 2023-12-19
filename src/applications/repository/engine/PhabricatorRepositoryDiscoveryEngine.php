@@ -93,14 +93,17 @@ final class PhabricatorRepositoryDiscoveryEngine
     // Clear the working set cache.
     $this->workingSet = array();
 
+    $task_priority = $this->getImportTaskPriority($repository, $refs);
+
     // Record discovered commits and mark them in the cache.
     foreach ($refs as $ref) {
       $this->recordCommit(
         $repository,
         $ref->getIdentifier(),
         $ref->getEpoch(),
-        $ref->getCanCloseImmediately(),
-        $ref->getParents());
+        $ref->getIsPermanent(),
+        $ref->getParents(),
+        $task_priority);
 
       $this->commitCache[$ref->getIdentifier()] = true;
     }
@@ -127,10 +130,7 @@ final class PhabricatorRepositoryDiscoveryEngine
    */
   private function discoverGitCommits() {
     $repository = $this->getRepository();
-
-    if (!$repository->isHosted()) {
-      $this->verifyGitOrigin($repository);
-    }
+    $publisher = $repository->newPublisher();
 
     $heads = id(new DiffusionLowLevelGitRefQuery())
       ->setRepository($repository)
@@ -142,61 +142,86 @@ final class PhabricatorRepositoryDiscoveryEngine
       return array();
     }
 
-    $heads = $this->sortRefs($heads);
-    $head_commits = mpull($heads, 'getCommitIdentifier');
-
     $this->log(
       pht(
         'Discovering commits in repository "%s".',
         $repository->getDisplayName()));
 
-    $this->fillCommitCache($head_commits);
+    $ref_lists = array();
 
-    $refs = array();
-    foreach ($heads as $ref) {
-      $name = $ref->getShortName();
-      $commit = $ref->getCommitIdentifier();
+    $head_groups = $this->getRefGroupsForDiscovery($heads);
+    foreach ($head_groups as $head_group) {
 
-      $this->log(
-        pht(
-          'Examining "%s" (%s) at "%s".',
-          $name,
-          $ref->getRefType(),
-          $commit));
+      $group_identifiers = mpull($head_group, 'getCommitIdentifier');
+      $group_identifiers = array_fuse($group_identifiers);
+      $this->fillCommitCache($group_identifiers);
 
-      if (!$repository->shouldTrackRef($ref)) {
-        $this->log(pht('Skipping, ref is untracked.'));
-        continue;
+      foreach ($head_group as $ref) {
+        $name = $ref->getShortName();
+        $commit = $ref->getCommitIdentifier();
+
+        $this->log(
+          pht(
+            'Examining "%s" (%s) at "%s".',
+            $name,
+            $ref->getRefType(),
+            $commit));
+
+        if (!$repository->shouldTrackRef($ref)) {
+          $this->log(pht('Skipping, ref is untracked.'));
+          continue;
+        }
+
+        if ($this->isKnownCommit($commit)) {
+          $this->log(pht('Skipping, HEAD is known.'));
+          continue;
+        }
+
+        // In Git, it's possible to tag anything. We just skip tags that don't
+        // point to a commit. See T11301.
+        $fields = $ref->getRawFields();
+        $ref_type = idx($fields, 'objecttype');
+        $tag_type = idx($fields, '*objecttype');
+        if ($ref_type != 'commit' && $tag_type != 'commit') {
+          $this->log(pht('Skipping, this is not a commit.'));
+          continue;
+        }
+
+        $this->log(pht('Looking for new commits.'));
+
+        $head_refs = $this->discoverStreamAncestry(
+          new PhabricatorGitGraphStream($repository, $commit),
+          $commit,
+          $publisher->isPermanentRef($ref));
+
+        $this->didDiscoverRefs($head_refs);
+
+        $ref_lists[] = $head_refs;
       }
-
-      if ($this->isKnownCommit($commit)) {
-        $this->log(pht('Skipping, HEAD is known.'));
-        continue;
-      }
-
-      // In Git, it's possible to tag anything. We just skip tags that don't
-      // point to a commit. See T11301.
-      $fields = $ref->getRawFields();
-      $ref_type = idx($fields, 'objecttype');
-      $tag_type = idx($fields, '*objecttype');
-      if ($ref_type != 'commit' && $tag_type != 'commit') {
-        $this->log(pht('Skipping, this is not a commit.'));
-        continue;
-      }
-
-      $this->log(pht('Looking for new commits.'));
-
-      $head_refs = $this->discoverStreamAncestry(
-        new PhabricatorGitGraphStream($repository, $commit),
-        $commit,
-        $repository->shouldAutocloseRef($ref));
-
-      $this->didDiscoverRefs($head_refs);
-
-      $refs[] = $head_refs;
     }
 
-    return array_mergev($refs);
+    $refs = array_mergev($ref_lists);
+
+    return $refs;
+  }
+
+  /**
+   * @task git
+   */
+  private function getRefGroupsForDiscovery(array $heads) {
+    $heads = $this->sortRefs($heads);
+
+    // See T13593. We hold a commit cache with a fixed maximum size. Split the
+    // refs into chunks no larger than the cache size, so we don't overflow the
+    // cache when testing them.
+
+    $array_iterator = new ArrayIterator($heads);
+
+    $chunk_iterator = new PhutilChunkedIterator(
+      $array_iterator,
+      self::MAX_COMMIT_CACHE_SIZE);
+
+    return $chunk_iterator;
   }
 
 
@@ -250,7 +275,7 @@ final class PhabricatorRepositoryDiscoveryEngine
         $refs[$identifier] = id(new PhabricatorRepositoryCommitRef())
           ->setIdentifier($identifier)
           ->setEpoch($epoch)
-          ->setCanCloseImmediately(true);
+          ->setIsPermanent(true);
 
         if ($upper_bound === null) {
           $upper_bound = $identifier;
@@ -290,13 +315,13 @@ final class PhabricatorRepositoryDiscoveryEngine
     $remote_root = (string)($xml->entry[0]->repository[0]->root[0]);
     $expect_root = $repository->getSubversionPathURI();
 
-    $normal_type_svn = PhabricatorRepositoryURINormalizer::TYPE_SVN;
+    $normal_type_svn = ArcanistRepositoryURINormalizer::TYPE_SVN;
 
-    $remote_normal = id(new PhabricatorRepositoryURINormalizer(
+    $remote_normal = id(new ArcanistRepositoryURINormalizer(
       $normal_type_svn,
       $remote_root))->getNormalizedPath();
 
-    $expect_normal = id(new PhabricatorRepositoryURINormalizer(
+    $expect_normal = id(new ArcanistRepositoryURINormalizer(
       $normal_type_svn,
       $expect_root))->getNormalizedPath();
 
@@ -354,7 +379,7 @@ final class PhabricatorRepositoryDiscoveryEngine
       $branch_refs = $this->discoverStreamAncestry(
         new PhabricatorMercurialGraphStream($repository, $commit),
         $commit,
-        $close_immediately = true);
+        $is_permanent = true);
 
       $this->didDiscoverRefs($branch_refs);
 
@@ -371,7 +396,7 @@ final class PhabricatorRepositoryDiscoveryEngine
   private function discoverStreamAncestry(
     PhabricatorRepositoryGraphStream $stream,
     $commit,
-    $close_immediately) {
+    $is_permanent) {
 
     $discover = array($commit);
     $graph = array();
@@ -401,7 +426,7 @@ final class PhabricatorRepositoryDiscoveryEngine
       }
     }
 
-    // Now, sort them topographically.
+    // Now, sort them topologically.
     $commits = $this->reduceGraph($graph);
 
     $refs = array();
@@ -424,7 +449,7 @@ final class PhabricatorRepositoryDiscoveryEngine
       $refs[] = id(new PhabricatorRepositoryCommitRef())
         ->setIdentifier($commit)
         ->setEpoch($epoch)
-        ->setCanCloseImmediately($close_immediately)
+        ->setIsPermanent($is_permanent)
         ->setParents($stream->getParents($commit));
     }
 
@@ -440,7 +465,7 @@ final class PhabricatorRepositoryDiscoveryEngine
     $graph = new PhutilDirectedScalarGraph();
     $graph->addNodes($edges);
 
-    $commits = $graph->getTopographicallySortedNodes();
+    $commits = $graph->getNodesInTopologicalOrder();
 
     // NOTE: We want the most ancestral nodes first, so we need to reverse the
     // list we get out of AbstractDirectedGraph.
@@ -459,13 +484,6 @@ final class PhabricatorRepositoryDiscoveryEngine
       return true;
     }
 
-    if ($this->repairMode) {
-      // In repair mode, rediscover the entire repository, ignoring the
-      // database state. We can hit the local cache above, but if we miss it
-      // stop the script from going to the database cache.
-      return false;
-    }
-
     $this->fillCommitCache(array($identifier));
 
     return isset($this->commitCache[$identifier]);
@@ -473,6 +491,13 @@ final class PhabricatorRepositoryDiscoveryEngine
 
   private function fillCommitCache(array $identifiers) {
     if (!$identifiers) {
+      return;
+    }
+
+    if ($this->repairMode) {
+      // In repair mode, rediscover the entire repository, ignoring the
+      // database state. The engine still maintains a local cache (the
+      // "Working Set") but we just give up before looking in the database.
       return;
     }
 
@@ -507,9 +532,9 @@ final class PhabricatorRepositoryDiscoveryEngine
   }
 
   /**
-   * Sort branches so we process closeable branches first. This makes the
-   * whole import process a little cheaper, since we can close these commits
-   * the first time through rather than catching them in the refs step.
+   * Sort refs so we process permanent refs first. This makes the whole import
+   * process a little cheaper, since we can publish these commits the first
+   * time through rather than catching them in the refs step.
    *
    * @task internal
    *
@@ -518,11 +543,12 @@ final class PhabricatorRepositoryDiscoveryEngine
    */
   private function sortRefs(array $refs) {
     $repository = $this->getRepository();
+    $publisher = $repository->newPublisher();
 
     $head_refs = array();
     $tail_refs = array();
     foreach ($refs as $ref) {
-      if ($repository->shouldAutocloseRef($ref)) {
+      if ($publisher->isPermanentRef($ref)) {
         $head_refs[] = $ref;
       } else {
         $tail_refs[] = $ref;
@@ -537,8 +563,9 @@ final class PhabricatorRepositoryDiscoveryEngine
     PhabricatorRepository $repository,
     $commit_identifier,
     $epoch,
-    $close_immediately,
-    array $parents) {
+    $is_permanent,
+    array $parents,
+    $task_priority) {
 
     $commit = new PhabricatorRepositoryCommit();
     $conn_w = $repository->establishConnection('w');
@@ -561,15 +588,15 @@ final class PhabricatorRepositoryDiscoveryEngine
         $commit_identifier);
 
       // After reviving a commit, schedule new daemons for it.
-      $this->didDiscoverCommit($repository, $commit, $epoch);
+      $this->didDiscoverCommit($repository, $commit, $epoch, $task_priority);
       return;
     }
 
     $commit->setRepositoryID($repository->getID());
     $commit->setCommitIdentifier($commit_identifier);
     $commit->setEpoch($epoch);
-    if ($close_immediately) {
-      $commit->setImportStatus(PhabricatorRepositoryCommit::IMPORTED_CLOSEABLE);
+    if ($is_permanent) {
+      $commit->setImportStatus(PhabricatorRepositoryCommit::IMPORTED_PERMANENT);
     }
 
     $data = new PhabricatorRepositoryCommitData();
@@ -622,7 +649,7 @@ final class PhabricatorRepositoryDiscoveryEngine
         }
       $commit->saveTransaction();
 
-      $this->didDiscoverCommit($repository, $commit, $epoch);
+      $this->didDiscoverCommit($repository, $commit, $epoch, $task_priority);
 
       if ($this->repairMode) {
         // Normally, the query should throw a duplicate key exception. If we
@@ -650,9 +677,14 @@ final class PhabricatorRepositoryDiscoveryEngine
   private function didDiscoverCommit(
     PhabricatorRepository $repository,
     PhabricatorRepositoryCommit $commit,
-    $epoch) {
+    $epoch,
+    $task_priority) {
 
-    $this->insertTask($repository, $commit);
+    $this->queueCommitImportTask(
+      $repository,
+      $commit->getPHID(),
+      $task_priority,
+      $via = 'discovery');
 
     // Update the repository summary table.
     queryfx(
@@ -674,56 +706,6 @@ final class PhabricatorRepositoryDiscoveryEngine
     foreach ($refs as $ref) {
       $this->workingSet[$ref->getIdentifier()] = true;
     }
-  }
-
-  private function insertTask(
-    PhabricatorRepository $repository,
-    PhabricatorRepositoryCommit $commit,
-    $data = array()) {
-
-    $vcs = $repository->getVersionControlSystem();
-    switch ($vcs) {
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_GIT:
-        $class = 'PhabricatorRepositoryGitCommitMessageParserWorker';
-        break;
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_SVN:
-        $class = 'PhabricatorRepositorySvnCommitMessageParserWorker';
-        break;
-      case PhabricatorRepositoryType::REPOSITORY_TYPE_MERCURIAL:
-        $class = 'PhabricatorRepositoryMercurialCommitMessageParserWorker';
-        break;
-      default:
-        throw new Exception(pht("Unknown repository type '%s'!", $vcs));
-    }
-
-    $data['commitID'] = $commit->getID();
-
-    // If the repository is importing for the first time, we schedule tasks
-    // at IMPORT priority, which is very low. Making progress on importing a
-    // new repository for the first time is less important than any other
-    // daemon task.
-
-    // If the repostitory has finished importing and we're just catching up
-    // on recent commits, we schedule discovery at COMMIT priority, which is
-    // slightly below the default priority.
-
-    // Note that followup tasks and triggered tasks (like those generated by
-    // Herald or Harbormaster) will queue at DEFAULT priority, so that each
-    // commit tends to fully import before we start the next one. This tends
-    // to give imports fairly predictable progress. See T11677 for some
-    // discussion.
-
-    if ($repository->isImporting()) {
-      $task_priority = PhabricatorWorker::PRIORITY_IMPORT;
-    } else {
-      $task_priority = PhabricatorWorker::PRIORITY_COMMIT;
-    }
-
-    $options = array(
-      'priority' => $task_priority,
-    );
-
-    PhabricatorWorker::scheduleTask($class, $data, $options);
   }
 
   private function isInitialImport(array $refs) {
@@ -798,8 +780,7 @@ final class PhabricatorRepositoryDiscoveryEngine
   }
 
   private function markUnreachableCommits(PhabricatorRepository $repository) {
-    // For now, this is only supported for Git.
-    if (!$repository->isGit()) {
+    if (!$repository->isGit() && !$repository->isHg()) {
       return;
     }
 
@@ -817,7 +798,11 @@ final class PhabricatorRepositoryDiscoveryEngine
     }
 
     // We can share a single graph stream across all the checks we need to do.
-    $stream = new PhabricatorGitGraphStream($repository);
+    if ($repository->isGit()) {
+      $stream = new PhabricatorGitGraphStream($repository);
+    } else if ($repository->isHg()) {
+      $stream = new PhabricatorMercurialGraphStream($repository);
+    }
 
     foreach ($old_refs as $old_ref) {
       $identifier = $old_ref->getCommitIdentifier();
@@ -830,7 +815,7 @@ final class PhabricatorRepositoryDiscoveryEngine
 
   private function markUnreachableFrom(
     PhabricatorRepository $repository,
-    PhabricatorGitGraphStream $stream,
+    PhabricatorRepositoryGraphStream $stream,
     $identifier) {
 
     $unreachable = array();
@@ -856,6 +841,13 @@ final class PhabricatorRepositoryDiscoveryEngine
       }
 
       $seen[$target_identifier] = true;
+
+      // See PHI1688. If this commit is already marked as unreachable, we don't
+      // need to consider its ancestors. This may skip a lot of work if many
+      // branches with a lot of shared ancestry are deleted at the same time.
+      if ($target->isUnreachable()) {
+        continue;
+      }
 
       try {
         $stream->getCommitDate($target_identifier);

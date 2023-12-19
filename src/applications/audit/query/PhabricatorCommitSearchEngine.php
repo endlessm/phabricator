@@ -15,6 +15,7 @@ final class PhabricatorCommitSearchEngine
     return id(new DiffusionCommitQuery())
       ->needAuditRequests(true)
       ->needCommitData(true)
+      ->needIdentities(true)
       ->needDrafts(true);
   }
 
@@ -53,6 +54,18 @@ final class PhabricatorCommitSearchEngine
       $query->withUnreachable($map['unreachable']);
     }
 
+    if ($map['permanent'] !== null) {
+      $query->withPermanent($map['permanent']);
+    }
+
+    if ($map['ancestorsOf']) {
+      $query->withAncestorsOf($map['ancestorsOf']);
+    }
+
+    if ($map['identifiers']) {
+      $query->withIdentifiers($map['identifiers']);
+    }
+
     return $query;
   }
 
@@ -63,35 +76,50 @@ final class PhabricatorCommitSearchEngine
         ->setKey('responsiblePHIDs')
         ->setConduitKey('responsible')
         ->setAliases(array('responsible', 'responsibles', 'responsiblePHID'))
-        ->setDatasource(new DifferentialResponsibleDatasource()),
+        ->setDatasource(new DifferentialResponsibleDatasource())
+        ->setDescription(
+          pht(
+            'Find commits where given users, projects, or packages are '.
+            'responsible for the next steps in the audit workflow.')),
       id(new PhabricatorUsersSearchField())
         ->setLabel(pht('Authors'))
         ->setKey('authorPHIDs')
         ->setConduitKey('authors')
-        ->setAliases(array('author', 'authors', 'authorPHID')),
+        ->setAliases(array('author', 'authors', 'authorPHID'))
+        ->setDescription(pht('Find commits authored by particular users.')),
       id(new PhabricatorSearchDatasourceField())
         ->setLabel(pht('Auditors'))
         ->setKey('auditorPHIDs')
         ->setConduitKey('auditors')
         ->setAliases(array('auditor', 'auditors', 'auditorPHID'))
-        ->setDatasource(new DiffusionAuditorFunctionDatasource()),
+        ->setDatasource(new DiffusionAuditorFunctionDatasource())
+        ->setDescription(
+          pht(
+            'Find commits where given users, projects, or packages are '.
+            'auditors.')),
       id(new PhabricatorSearchCheckboxesField())
         ->setLabel(pht('Audit Status'))
         ->setKey('statuses')
         ->setAliases(array('status'))
-        ->setOptions(PhabricatorAuditCommitStatusConstants::getStatusNameMap()),
+        ->setOptions(DiffusionCommitAuditStatus::newOptions())
+        ->setDeprecatedOptions(
+          DiffusionCommitAuditStatus::newDeprecatedOptions())
+        ->setDescription(pht('Find commits with given audit statuses.')),
       id(new PhabricatorSearchDatasourceField())
         ->setLabel(pht('Repositories'))
         ->setKey('repositoryPHIDs')
         ->setConduitKey('repositories')
         ->setAliases(array('repository', 'repositories', 'repositoryPHID'))
-        ->setDatasource(new DiffusionRepositoryFunctionDatasource()),
+        ->setDatasource(new DiffusionRepositoryFunctionDatasource())
+        ->setDescription(pht('Find commits in particular repositories.')),
       id(new PhabricatorSearchDatasourceField())
         ->setLabel(pht('Packages'))
         ->setKey('packagePHIDs')
         ->setConduitKey('packages')
         ->setAliases(array('package', 'packages', 'packagePHID'))
-        ->setDatasource(new PhabricatorOwnersPackageDatasource()),
+        ->setDatasource(new PhabricatorOwnersPackageDatasource())
+        ->setDescription(
+          pht('Find commits which affect given packages.')),
       id(new PhabricatorSearchThreeStateField())
         ->setLabel(pht('Unreachable'))
         ->setKey('unreachable')
@@ -103,6 +131,33 @@ final class PhabricatorCommitSearchEngine
           pht(
             'Find or exclude unreachable commits which are not ancestors of '.
             'any branch, tag, or ref.')),
+      id(new PhabricatorSearchThreeStateField())
+        ->setLabel(pht('Permanent'))
+        ->setKey('permanent')
+        ->setOptions(
+          pht('(Show All)'),
+          pht('Show Only Permanent Commits'),
+          pht('Hide Permanent Commits'))
+        ->setDescription(
+          pht(
+            'Find or exclude permanent commits which are ancestors of '.
+            'any permanent branch, tag, or ref.')),
+      id(new PhabricatorSearchStringListField())
+        ->setLabel(pht('Ancestors Of'))
+        ->setKey('ancestorsOf')
+        ->setDescription(
+          pht(
+            'Find commits which are ancestors of a particular ref, '.
+            'like "master".')),
+      id(new PhabricatorSearchStringListField())
+        ->setLabel(pht('Identifiers'))
+        ->setKey('identifiers')
+        ->setDescription(
+          pht(
+            'Find commits with particular identifiers (usually, hashes). '.
+            'Supports full or partial identifiers (like "abcd12340987..." or '.
+            '"abcd1234") and qualified or unqualified identifiers (like '.
+            '"rXabcd1234" or "abcd1234").')),
     );
   }
 
@@ -136,7 +191,7 @@ final class PhabricatorCommitSearchEngine
       case 'active':
         $bucket_key = DiffusionCommitRequiredActionResultBucket::BUCKETKEY;
 
-        $open = PhabricatorAuditCommitStatusConstants::getOpenStatusConstants();
+        $open = DiffusionCommitAuditStatus::getOpenStatusConstants();
 
         $query
           ->setParameter('responsiblePHIDs', array($viewer_phid))
@@ -166,9 +221,9 @@ final class PhabricatorCommitSearchEngine
 
     $bucket = $this->getResultBucket($query);
 
-    $template = id(new PhabricatorAuditListView())
+    $template = id(new DiffusionCommitGraphView())
       ->setViewer($viewer)
-      ->setShowDrafts(true);
+      ->setShowAuditors(true);
 
     $views = array();
     if ($bucket) {
@@ -180,37 +235,31 @@ final class PhabricatorCommitSearchEngine
         foreach ($groups as $group) {
           // Don't show groups in Dashboard Panels
           if ($group->getObjects() || !$this->isPanelContext()) {
-            $views[] = id(clone $template)
+            $item_list = id(clone $template)
+              ->setCommits($group->getObjects())
+              ->newObjectItemListView();
+
+            $views[] = $item_list
               ->setHeader($group->getName())
-              ->setNoDataString($group->getNoDataString())
-              ->setCommits($group->getObjects());
+              ->setNoDataString($group->getNoDataString());
           }
         }
       } catch (Exception $ex) {
         $this->addError($ex->getMessage());
       }
-    } else {
-      $views[] = id(clone $template)
-        ->setCommits($commits)
-        ->setNoDataString(pht('No commits found.'));
     }
 
     if (!$views) {
-      $views[] = id(new PhabricatorAuditListView())
-        ->setViewer($viewer)
+      $item_list = id(clone $template)
+        ->setCommits($commits)
+        ->newObjectItemListView();
+
+      $views[] = $item_list
         ->setNoDataString(pht('No commits found.'));
     }
 
-    if (count($views) == 1) {
-      $list = head($views)->buildList();
-    } else {
-      $list = $views;
-    }
-
-    $result = new PhabricatorApplicationSearchResultView();
-    $result->setContent($list);
-
-    return $result;
+    return id(new PhabricatorApplicationSearchResultView())
+      ->setContent($views);
   }
 
   protected function getNewUserBody() {

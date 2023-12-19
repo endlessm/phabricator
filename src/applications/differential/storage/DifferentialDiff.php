@@ -9,7 +9,8 @@ final class DifferentialDiff
     HarbormasterCircleCIBuildableInterface,
     HarbormasterBuildkiteBuildableInterface,
     PhabricatorApplicationTransactionInterface,
-    PhabricatorDestructibleInterface {
+    PhabricatorDestructibleInterface,
+    PhabricatorConduitResultInterface {
 
   protected $revisionID;
   protected $authorPHID;
@@ -41,7 +42,7 @@ final class DifferentialDiff
   private $unsavedChangesets = array();
   private $changesets = self::ATTACHABLE;
   private $revision = self::ATTACHABLE;
-  private $properties = array();
+  private $properties = self::ATTACHABLE;
   private $buildable = self::ATTACHABLE;
 
   private $unitMessages = self::ATTACHABLE;
@@ -188,7 +189,7 @@ final class DifferentialDiff
       $hunks = $change->getHunks();
       if ($hunks) {
         foreach ($hunks as $hunk) {
-          $dhunk = new DifferentialModernHunk();
+          $dhunk = new DifferentialHunk();
           $dhunk->setOldOffset($hunk->getOldOffset());
           $dhunk->setOldLen($hunk->getOldLength());
           $dhunk->setNewOffset($hunk->getNewOffset());
@@ -229,16 +230,18 @@ final class DifferentialDiff
     }
     $diff->setLineCount($lines);
 
-    $parser = new DifferentialChangesetParser();
-    $changesets = $parser->detectCopiedCode(
-      $diff->getChangesets(),
-      $min_width = 30,
-      $min_lines = 3);
-    $diff->attachChangesets($changesets);
+    $changesets = $diff->getChangesets();
+
+    // TODO: This is "safe", but it would be better to propagate a real user
+    // down the stack.
+    $viewer = PhabricatorUser::getOmnipotentUser();
+
+    id(new DifferentialChangesetEngine())
+      ->setViewer($viewer)
+      ->rebuildChangesets($changesets);
 
     return $diff;
   }
-
 
   public function getDiffDict() {
     $dict = array(
@@ -335,6 +338,9 @@ final class DifferentialDiff
   }
 
   public function attachProperty($key, $value) {
+    if (!is_array($this->properties)) {
+      $this->properties = array();
+    }
     $this->properties[$key] = $value;
     return $this;
   }
@@ -389,9 +395,10 @@ final class DifferentialDiff
       return array();
     }
 
-    $unit = id(new HarbormasterBuildUnitMessage())->loadAllWhere(
-      'buildTargetPHID IN (%Ls)',
-      $target_phids);
+    $unit = id(new HarbormasterBuildUnitMessageQuery())
+      ->setViewer($viewer)
+      ->withBuildTargetPHIDs($target_phids)
+      ->execute();
 
     $map = array();
     foreach ($unit as $message) {
@@ -473,6 +480,11 @@ final class DifferentialDiff
             $this->getRevision(),
             PhabricatorPolicyCapability::CAN_VIEW,
           );
+        } else if ($this->getRepositoryPHID()) {
+          $extended[] = array(
+            $this->getRepositoryPHID(),
+            PhabricatorPolicyCapability::CAN_VIEW,
+          );
         }
         break;
     }
@@ -508,10 +520,6 @@ final class DifferentialDiff
     return null;
   }
 
-  public function getHarbormasterPublishablePHID() {
-    return $this->getHarbormasterContainerPHID();
-  }
-
   public function getBuildVariables() {
     $results = array();
 
@@ -542,9 +550,9 @@ final class DifferentialDiff
       'buildable.revision' =>
         pht('The differential revision ID, if applicable.'),
       'repository.callsign' =>
-        pht('The callsign of the repository in Phabricator.'),
+        pht('The callsign of the repository.'),
       'repository.phid' =>
-        pht('The PHID of the repository in Phabricator.'),
+        pht('The PHID of the repository.'),
       'repository.vcs' =>
         pht('The version control system, either "svn", "hg" or "git".'),
       'repository.uri' =>
@@ -554,6 +562,10 @@ final class DifferentialDiff
       'repository.staging.ref' =>
         pht('The ref name for this change in the staging repository.'),
     );
+  }
+
+  public function newBuildableEngine() {
+    return new DifferentialBuildableEngine();
   }
 
 
@@ -701,19 +713,8 @@ final class DifferentialDiff
     return new DifferentialDiffEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new DifferentialDiffTransaction();
-  }
-
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-
-    return $timeline;
   }
 
 
@@ -722,6 +723,8 @@ final class DifferentialDiff
 
   public function destroyObjectPermanently(
     PhabricatorDestructionEngine $engine) {
+
+    $viewer = $engine->getViewer();
 
     $this->openTransaction();
       $this->delete();
@@ -737,7 +740,95 @@ final class DifferentialDiff
         $prop->delete();
       }
 
+      $viewstate_query = id(new DifferentialViewStateQuery())
+        ->setViewer($viewer)
+        ->withObjectPHIDs(array($this->getPHID()));
+      $viewstates = new PhabricatorQueryIterator($viewstate_query);
+      foreach ($viewstates as $viewstate) {
+        $viewstate->delete();
+      }
+
     $this->saveTransaction();
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('revisionPHID')
+        ->setType('phid')
+        ->setDescription(pht('Associated revision PHID.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('authorPHID')
+        ->setType('phid')
+        ->setDescription(pht('Revision author PHID.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('repositoryPHID')
+        ->setType('phid')
+        ->setDescription(pht('Associated repository PHID.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('refs')
+        ->setType('map<string, wild>')
+        ->setDescription(pht('List of related VCS references.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    $refs = array();
+
+    $branch = $this->getBranch();
+    if (strlen($branch)) {
+      $refs[] = array(
+        'type' => 'branch',
+        'name' => $branch,
+      );
+    }
+
+    $onto = $this->loadTargetBranch();
+    if (strlen($onto)) {
+      $refs[] = array(
+        'type' => 'onto',
+        'name' => $onto,
+      );
+    }
+
+    $base = $this->getSourceControlBaseRevision();
+    if (strlen($base)) {
+      $refs[] = array(
+        'type' => 'base',
+        'identifier' => $base,
+      );
+    }
+
+    $bookmark = $this->getBookmark();
+    if (strlen($bookmark)) {
+      $refs[] = array(
+        'type' => 'bookmark',
+        'name' => $bookmark,
+      );
+    }
+
+    $revision_phid = null;
+    if ($this->getRevisionID()) {
+      $revision_phid = $this->getRevision()->getPHID();
+    }
+
+    return array(
+      'revisionPHID' => $revision_phid,
+      'authorPHID' => $this->getAuthorPHID(),
+      'repositoryPHID' => $this->getRepositoryPHID(),
+      'refs' => $refs,
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array(
+      id(new DifferentialCommitsSearchEngineAttachment())
+        ->setAttachmentKey('commits'),
+    );
   }
 
 }

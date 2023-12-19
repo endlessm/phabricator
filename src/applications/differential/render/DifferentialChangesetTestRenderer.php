@@ -76,7 +76,7 @@ abstract class DifferentialChangesetTestRenderer
             $any_new = true;
           }
           $num = nonempty($p['line'], '-');
-          $render = $p['render'];
+          $render = (string)$p['render'];
           $htype = nonempty($p['htype'], '.');
 
           // TODO: This should probably happen earlier, whenever we deal with
@@ -96,10 +96,14 @@ abstract class DifferentialChangesetTestRenderer
             array(
               '<span class="bright">',
               '</span>',
+              '<span class="depth-out">',
+              '<span class="depth-in">',
             ),
             array(
               '{(',
               ')}',
+              '{<',
+              '{>',
             ),
             $render);
 
@@ -127,17 +131,7 @@ abstract class DifferentialChangesetTestRenderer
     }
 
     $out = implode("\n", $out)."\n";
-    return $out;
-  }
-
-
-  public function renderFileChange(
-    $old_file = null,
-    $new_file = null,
-    $id = 0,
-    $vs = 0) {
-
-    throw new PhutilMethodNotImplementedException();
+    return phutil_safe_html($out);
   }
 
 }

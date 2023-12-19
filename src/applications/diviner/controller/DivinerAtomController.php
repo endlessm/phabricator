@@ -72,7 +72,7 @@ final class DivinerAtomController extends DivinerController {
     $prop_list = new PHUIPropertyGroupView();
     $prop_list->addPropertyList($properties);
 
-    $document = id(new PHUIDocumentViewPro())
+    $document = id(new PHUIDocumentView())
       ->setBook($book->getTitle(), $group_name)
       ->setHeader($header)
       ->addClass('diviner-view');
@@ -435,9 +435,16 @@ final class DivinerAtomController extends DivinerController {
     $task_specs = array();
 
     $tasks = $symbol->getAtom()->getDocblockMetaValue('task');
-    if (strlen($tasks)) {
-      $tasks = phutil_split_lines($tasks, $retain_endings = false);
 
+    if (!is_array($tasks)) {
+      if (strlen($tasks)) {
+        $tasks = array($tasks);
+      } else {
+        $tasks = array();
+      }
+    }
+
+    if ($tasks) {
       foreach ($tasks as $task) {
         list($name, $title) = explode(' ', $task, 2);
         $name = trim($name);

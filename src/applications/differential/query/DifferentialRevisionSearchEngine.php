@@ -45,6 +45,22 @@ final class DifferentialRevisionSearchEngine
       $query->withStatuses($map['statuses']);
     }
 
+    if ($map['createdStart'] || $map['createdEnd']) {
+      $query->withCreatedEpochBetween(
+        $map['createdStart'],
+        $map['createdEnd']);
+    }
+
+    if ($map['modifiedStart'] || $map['modifiedEnd']) {
+      $query->withUpdatedEpochBetween(
+        $map['modifiedStart'],
+        $map['modifiedEnd']);
+    }
+
+    if ($map['affectedPaths']) {
+      $query->withPaths($map['affectedPaths']);
+    }
+
     return $query;
   }
 
@@ -67,7 +83,7 @@ final class DifferentialRevisionSearchEngine
         ->setLabel(pht('Reviewers'))
         ->setKey('reviewerPHIDs')
         ->setAliases(array('reviewer', 'reviewers', 'reviewerPHID'))
-        ->setDatasource(new DiffusionAuditorFunctionDatasource())
+        ->setDatasource(new DifferentialReviewerFunctionDatasource())
         ->setDescription(
           pht('Find revisions with specific reviewers.')),
       id(new PhabricatorSearchDatasourceField())
@@ -84,6 +100,34 @@ final class DifferentialRevisionSearchEngine
         ->setDatasource(new DifferentialRevisionStatusFunctionDatasource())
         ->setDescription(
           pht('Find revisions with particular statuses.')),
+      id(new PhabricatorSearchDateField())
+        ->setLabel(pht('Created After'))
+        ->setKey('createdStart')
+        ->setDescription(
+          pht('Find revisions created at or after a particular time.')),
+      id(new PhabricatorSearchDateField())
+        ->setLabel(pht('Created Before'))
+        ->setKey('createdEnd')
+        ->setDescription(
+          pht('Find revisions created at or before a particular time.')),
+      id(new PhabricatorSearchDateField())
+        ->setLabel(pht('Modified After'))
+        ->setKey('modifiedStart')
+        ->setIsHidden(true)
+        ->setDescription(
+          pht('Find revisions modified at or after a particular time.')),
+      id(new PhabricatorSearchDateField())
+        ->setLabel(pht('Modified Before'))
+        ->setKey('modifiedEnd')
+        ->setIsHidden(true)
+        ->setDescription(
+          pht('Find revisions modified at or before a particular time.')),
+      id(new PhabricatorSearchStringListField())
+        ->setKey('affectedPaths')
+        ->setLabel(pht('Affected Paths'))
+        ->setDescription(
+          pht('Search for revisions affecting particular paths.'))
+        ->setIsHidden(true),
     );
   }
 
@@ -148,7 +192,7 @@ final class DifferentialRevisionSearchEngine
 
     $viewer = $this->requireViewer();
     $template = id(new DifferentialRevisionListView())
-      ->setUser($viewer)
+      ->setViewer($viewer)
       ->setNoBox($this->isPanelContext());
 
     $bucket = $this->getResultBucket($query);
@@ -176,28 +220,16 @@ final class DifferentialRevisionSearchEngine
       }
     } else {
       $views[] = id(clone $template)
-        ->setRevisions($revisions)
-        ->setHandles(array());
+        ->setRevisions($revisions);
     }
 
     if (!$views) {
       $views[] = id(new DifferentialRevisionListView())
-        ->setUser($viewer)
+        ->setViewer($viewer)
         ->setNoDataString(pht('No revisions found.'));
     }
 
-    $phids = array_mergev(mpull($views, 'getRequiredHandlePHIDs'));
-    if ($phids) {
-      $handles = id(new PhabricatorHandleQuery())
-        ->setViewer($viewer)
-        ->withPHIDs($phids)
-        ->execute();
-    } else {
-      $handles = array();
-    }
-
     foreach ($views as $view) {
-      $view->setHandles($handles);
       $view->setUnlandedDependencies($unlanded);
     }
 
@@ -283,6 +315,79 @@ final class DifferentialRevisionSearchEngine
     }
 
     return $result;
+  }
+
+  protected function newExportFields() {
+    $fields = array(
+      id(new PhabricatorStringExportField())
+        ->setKey('monogram')
+        ->setLabel(pht('Monogram')),
+      id(new PhabricatorPHIDExportField())
+        ->setKey('authorPHID')
+        ->setLabel(pht('Author PHID')),
+      id(new PhabricatorStringExportField())
+        ->setKey('author')
+        ->setLabel(pht('Author')),
+      id(new PhabricatorStringExportField())
+        ->setKey('status')
+        ->setLabel(pht('Status')),
+      id(new PhabricatorStringExportField())
+        ->setKey('statusName')
+        ->setLabel(pht('Status Name')),
+      id(new PhabricatorURIExportField())
+        ->setKey('uri')
+        ->setLabel(pht('URI')),
+      id(new PhabricatorStringExportField())
+        ->setKey('title')
+        ->setLabel(pht('Title')),
+      id(new PhabricatorStringExportField())
+        ->setKey('summary')
+        ->setLabel(pht('Summary')),
+      id(new PhabricatorStringExportField())
+        ->setKey('testPlan')
+        ->setLabel(pht('Test Plan')),
+    );
+
+    return $fields;
+  }
+
+  protected function newExportData(array $revisions) {
+    $viewer = $this->requireViewer();
+
+    $phids = array();
+    foreach ($revisions as $revision) {
+      $phids[] = $revision->getAuthorPHID();
+    }
+    $handles = $viewer->loadHandles($phids);
+
+    $export = array();
+    foreach ($revisions as $revision) {
+
+      $author_phid = $revision->getAuthorPHID();
+      if ($author_phid) {
+        $author_name = $handles[$author_phid]->getName();
+      } else {
+        $author_name = null;
+      }
+
+      $status = $revision->getStatusObject();
+      $status_name = $status->getDisplayName();
+      $status_value = $status->getKey();
+
+      $export[] = array(
+        'monogram' => $revision->getMonogram(),
+        'authorPHID' => $author_phid,
+        'author' => $author_name,
+        'status' => $status_value,
+        'statusName' => $status_name,
+        'uri' => PhabricatorEnv::getProductionURI($revision->getURI()),
+        'title' => (string)$revision->getTitle(),
+        'summary' => (string)$revision->getSummary(),
+        'testPlan' => (string)$revision->getTestPlan(),
+      );
+    }
+
+    return $export;
   }
 
 }

@@ -37,11 +37,7 @@ final class PhabricatorRepositoryTestCase
       $repo->shouldTrackBranch('imaginary'),
       pht('Track all branches by default.'));
 
-    $repo->setDetail(
-      'branch-filter',
-      array(
-        'master' => true,
-      ));
+    $repo->setTrackOnlyRules(array('master'));
 
     $this->assertTrue(
       $repo->shouldTrackBranch('master'),
@@ -102,55 +98,6 @@ final class PhabricatorRepositoryTestCase
       'file:///var/repo/SVN/quack/trunk/@HEAD',
       $repo->getSubversionBaseURI('HEAD'));
 
-  }
-
-  public function testFilterMercurialDebugOutput() {
-    $map = array(
-      '' => '',
-
-      "quack\n" => "quack\n",
-
-      "ignoring untrusted configuration option x.y = z\nquack\n" =>
-        "quack\n",
-
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "quack\n" =>
-        "quack\n",
-
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "quack\n" =>
-        "quack\n",
-
-      "quack\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n" =>
-        "quack\n",
-
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "duck\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "bread\n".
-      "ignoring untrusted configuration option x.y = z\n".
-      "quack\n" =>
-        "duck\nbread\nquack\n",
-
-      "ignoring untrusted configuration option x.y = z\n".
-      "duckignoring untrusted configuration option x.y = z\n".
-      "quack" =>
-        'duckquack',
-    );
-
-    foreach ($map as $input => $expect) {
-      $actual = DiffusionMercurialCommandEngine::filterMercurialDebugOutput(
-        $input);
-      $this->assertEqual($expect, $actual, $input);
-    }
   }
 
   public function testRepositoryShortNameValidation() {

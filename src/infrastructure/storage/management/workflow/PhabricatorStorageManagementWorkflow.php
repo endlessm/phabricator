@@ -47,7 +47,7 @@ abstract class PhabricatorStorageManagementWorkflow
 
     throw new PhutilArgumentUsageException(
       pht(
-        'Phabricator is configured in cluster mode, with multiple database '.
+        'This server is configured in cluster mode, with multiple database '.
         'hosts. Use "--host" to specify which host you want to operate on.'));
   }
 
@@ -98,7 +98,7 @@ abstract class PhabricatorStorageManagementWorkflow
         } else {
           throw new PhutilArgumentUsageException(
             pht(
-              'Phabricator is currently in read-only mode. Use --force to '.
+              'This server is currently in read-only mode. Use --force to '.
               'override this mode.'));
         }
       }
@@ -156,7 +156,7 @@ abstract class PhabricatorStorageManagementWorkflow
     return $err;
   }
 
-  final private function doAdjustSchemata(
+  private function doAdjustSchemata(
     PhabricatorStorageManagementAPI $api,
     $unsafe) {
 
@@ -181,15 +181,15 @@ abstract class PhabricatorStorageManagementWorkflow
     if (!$this->force && !$api->isCharacterSetAvailable('utf8mb4')) {
       $message = pht(
         "You have an old version of MySQL (older than 5.5) which does not ".
-        "support the utf8mb4 character set. We strongly recomend upgrading to ".
-        "5.5 or newer.\n\n".
+        "support the utf8mb4 character set. We strongly recommend upgrading ".
+        "to 5.5 or newer.\n\n".
         "If you apply adjustments now and later update MySQL to 5.5 or newer, ".
         "you'll need to apply adjustments again (and they will take a long ".
         "time).\n\n".
         "You can exit this workflow, update MySQL now, and then run this ".
         "workflow again. This is recommended, but may cause a lot of downtime ".
         "right now.\n\n".
-        "You can exit this workflow, continue using Phabricator without ".
+        "You can exit this workflow, continue using this software without ".
         "applying adjustments, update MySQL at a later date, and then run ".
         "this workflow again. This is also a good approach, and will let you ".
         "delay downtime until later.\n\n".
@@ -357,28 +357,82 @@ abstract class PhabricatorStorageManagementWorkflow
                 }
 
                 if ($adjust['charset']) {
+                  switch ($adjust['charset']) {
+                    case 'binary':
+                      $charset_value = qsprintf($conn, 'binary');
+                      break;
+                    case 'utf8':
+                      $charset_value = qsprintf($conn, 'utf8');
+                      break;
+                    case 'utf8mb4':
+                      $charset_value = qsprintf($conn, 'utf8mb4');
+                      break;
+                    default:
+                      throw new Exception(
+                        pht(
+                          'Unsupported character set "%s".',
+                          $adjust['charset']));
+                  }
+
+                  switch ($adjust['collation']) {
+                    case 'binary':
+                      $collation_value = qsprintf($conn, 'binary');
+                      break;
+                    case 'utf8_general_ci':
+                      $collation_value = qsprintf($conn, 'utf8_general_ci');
+                      break;
+                    case 'utf8mb4_bin':
+                      $collation_value = qsprintf($conn, 'utf8mb4_bin');
+                      break;
+                    case 'utf8mb4_unicode_ci':
+                      $collation_value = qsprintf($conn, 'utf8mb4_unicode_ci');
+                      break;
+                    default:
+                      throw new Exception(
+                        pht(
+                          'Unsupported collation set "%s".',
+                          $adjust['collation']));
+                  }
+
                   $parts[] = qsprintf(
                     $conn,
                     'CHARACTER SET %Q COLLATE %Q',
-                    $adjust['charset'],
-                    $adjust['collation']);
+                    $charset_value,
+                    $collation_value);
                 }
+
+                if ($parts) {
+                  $parts = qsprintf($conn, '%LJ', $parts);
+                } else {
+                  $parts = qsprintf($conn, '');
+                }
+
+                if ($adjust['nullable']) {
+                  $nullable = qsprintf($conn, 'NULL');
+                } else {
+                  $nullable = qsprintf($conn, 'NOT NULL');
+                }
+
+                // TODO: We're using "%Z" here for the column type, which is
+                // technically unsafe. It would be nice to be able to use "%Q"
+                // instead, but this requires a fair amount of legwork to
+                // enumerate all column types.
 
                 queryfx(
                   $conn,
-                  'ALTER TABLE %T.%T MODIFY %T %Q %Q %Q',
+                  'ALTER TABLE %T.%T MODIFY %T %Z %Q %Q',
                   $adjust['database'],
                   $adjust['table'],
                   $adjust['name'],
                   $adjust['type'],
-                  implode(' ', $parts),
-                  $adjust['nullable'] ? 'NULL' : 'NOT NULL');
+                  $parts,
+                  $nullable);
               }
               break;
             case 'key':
               if (($phase == 'drop_keys') && $adjust['exists']) {
                 if ($adjust['name'] == 'PRIMARY') {
-                  $key_name = 'PRIMARY KEY';
+                  $key_name = qsprintf($conn, 'PRIMARY KEY');
                 } else {
                   $key_name = qsprintf($conn, 'KEY %T', $adjust['name']);
                 }
@@ -395,7 +449,7 @@ abstract class PhabricatorStorageManagementWorkflow
                 // Different keys need different creation syntax. Notable
                 // special cases are primary keys and fulltext keys.
                 if ($adjust['name'] == 'PRIMARY') {
-                  $key_name = 'PRIMARY KEY';
+                  $key_name = qsprintf($conn, 'PRIMARY KEY');
                 } else if ($adjust['indexType'] == 'FULLTEXT') {
                   $key_name = qsprintf($conn, 'FULLTEXT %T', $adjust['name']);
                 } else {
@@ -414,11 +468,11 @@ abstract class PhabricatorStorageManagementWorkflow
 
                 queryfx(
                   $conn,
-                  'ALTER TABLE %T.%T ADD %Q (%Q)',
+                  'ALTER TABLE %T.%T ADD %Q (%LK)',
                   $adjust['database'],
                   $adjust['table'],
                   $key_name,
-                  implode(', ', $adjust['columns']));
+                  $adjust['columns']);
               }
               break;
             default:
@@ -772,8 +826,8 @@ abstract class PhabricatorStorageManagementWorkflow
     $message = array();
     if ($all_surplus) {
       $message[] = pht(
-        'You have surplus schemata (extra tables or columns which Phabricator '.
-        'does not expect). For information on resolving these '.
+        'You have surplus schemata (extra tables or columns which this '.
+        'software does not expect). For information on resolving these '.
         'issues, see the "Surplus Schemata" section in the "Managing Storage '.
         'Adjustments" article in the documentation.');
     } else if ($all_access) {
@@ -790,27 +844,29 @@ abstract class PhabricatorStorageManagementWorkflow
         $message[] = pht(
           'Some of these errors are caused by access control problems. '.
           'The user you are connecting with does not have permission to see '.
-          'all of the database or tables that Phabricator uses. You need to '.
+          'all of the database or tables that this software uses. You need to '.
           'GRANT the user more permission, or use a different user.');
       }
 
       if ($any_surplus) {
         $message[] = pht(
           'Some of these errors are caused by surplus schemata (extra '.
-          'tables or columns which Phabricator does not expect). These are '.
+          'tables or columns which this software does not expect). These are '.
           'not serious. For information on resolving these issues, see the '.
           '"Surplus Schemata" section in the "Managing Storage Adjustments" '.
           'article in the documentation.');
       }
 
       $message[] = pht(
-        'If you are not developing Phabricator itself, report this issue to '.
-        'the upstream.');
+        'If you are not developing %s itself, report this issue to '.
+        'the upstream.',
+        PlatformSymbols::getPlatformServerName());
 
       $message[] = pht(
-        'If you are developing Phabricator, these errors usually indicate '.
+        'If you are developing %s, these errors usually indicate '.
         'that your schema specifications do not agree with the schemata your '.
-        'code actually builds.');
+        'code actually builds.',
+        PlatformSymbols::getPlatformServerName());
     }
     $message = implode("\n\n", $message);
 
@@ -859,7 +915,7 @@ abstract class PhabricatorStorageManagementWorkflow
     }
   }
 
-  final private function doUpgradeSchemata(
+  private function doUpgradeSchemata(
     array $apis,
     $apply_only,
     $no_quickstart,
@@ -867,6 +923,10 @@ abstract class PhabricatorStorageManagementWorkflow
 
     $patches = $this->patches;
     $is_dryrun = $this->dryRun;
+
+    // We expect that patches should already be sorted properly. However,
+    // phase behavior will be wrong if they aren't, so make sure.
+    $patches = msortv($patches, 'newSortVector');
 
     $api_map = array();
     foreach ($apis as $api) {
@@ -1163,12 +1223,16 @@ abstract class PhabricatorStorageManagementWorkflow
     // Although we're holding this lock on different databases so it could
     // have the same name on each as far as the database is concerned, the
     // locks would be the same within this process.
-    $ref_key = $api->getRef()->getRefKey();
-    $ref_hash = PhabricatorHash::digestForIndex($ref_key);
-    $lock_name = 'adjust('.$ref_hash.')';
+    $parameters = array(
+      'refKey' => $api->getRef()->getRefKey(),
+    );
 
-    return PhabricatorGlobalLock::newLock($lock_name)
-      ->useSpecificConnection($api->getConn(null))
+    // We disable logging for this lock because we may not have created the
+    // log table yet, or may need to adjust it.
+
+    return PhabricatorGlobalLock::newLock('adjust', $parameters)
+      ->setExternalConnection($api->getConn(null))
+      ->setDisableLogging(true)
       ->lock();
   }
 

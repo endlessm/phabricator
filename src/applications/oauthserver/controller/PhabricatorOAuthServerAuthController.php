@@ -172,9 +172,32 @@ final class PhabricatorOAuthServerAuthController
         ));
 
       if ($client->getIsTrusted()) {
-        return id(new AphrontRedirectResponse())
-          ->setIsExternal(true)
-          ->setURI((string)$full_uri);
+        // NOTE: See T13099. We currently emit a "Content-Security-Policy"
+        // which includes a narrow "form-action". At the time of writing,
+        // Chrome applies "form-action" to redirects following form submission.
+
+        // This can lead to a situation where a user enters the OAuth workflow
+        // and is prompted for MFA. When they submit an MFA response, the form
+        // can redirect here, and Chrome will block the "Location" redirect.
+
+        // To avoid this, render an interstitial. We only actually need to do
+        // this in Chrome (but do it everywhere for consistency) and only need
+        // to do it if the request is a redirect after a form submission (but
+        // we can't tell if it is or not).
+
+        Javelin::initBehavior(
+          'redirect',
+          array(
+            'uri' => (string)$full_uri,
+          ));
+
+        return $this->newDialog()
+          ->setTitle(pht('Authenticate: %s', $name))
+          ->appendParagraph(
+            pht(
+              'Authorization for "%s" confirmed, redirecting...',
+              phutil_tag('strong', array(), $name)))
+          ->addCancelButton((string)$full_uri, pht('Continue'));
       }
 
       // TODO: It would be nice to give the user more options here, like
@@ -186,9 +209,10 @@ final class PhabricatorOAuthServerAuthController
         ->setTitle(pht('Authenticate: %s', $name))
         ->appendParagraph(
           pht(
-            'This application ("%s") is authorized to use your Phabricator '.
+            'This application ("%s") is authorized to use your %s '.
             'credentials. Continue to complete the authentication workflow.',
-            phutil_tag('strong', array(), $name)))
+            phutil_tag('strong', array(), $name),
+            PlatformSymbols::getPlatformServerName()))
         ->addCancelButton((string)$full_uri, pht('Continue to Application'));
 
       return id(new AphrontDialogResponse())->setDialog($dialog);
@@ -225,9 +249,10 @@ final class PhabricatorOAuthServerAuthController
       ->appendParagraph(
         pht(
           'Do you want to authorize the external application "%s" to '.
-          'access your Phabricator account data, including your primary '.
+          'access your %s account data, including your primary '.
           'email address?',
-          phutil_tag('strong', array(), $name)))
+          phutil_tag('strong', array(), $name),
+          PlatformSymbols::getPlatformServerName()))
       ->appendForm($form)
       ->addSubmitButton(pht('Authorize Access'))
       ->addCancelButton((string)$cancel_uri, pht('Do Not Authorize'));
@@ -248,8 +273,8 @@ final class PhabricatorOAuthServerAuthController
         pht(
           'This application also requested additional unrecognized '.
           'permissions. These permissions may have existed in an older '.
-          'version of Phabricator, or may be from a future version of '.
-          'Phabricator. They will not be granted.'));
+          'version of the software, or may be from a future version of '.
+          'the software. They will not be granted.'));
 
       $unknown_form = id(new AphrontFormView())
         ->setViewer($viewer)
@@ -283,7 +308,7 @@ final class PhabricatorOAuthServerAuthController
 
     foreach ($params as $key => $value) {
       if (strlen($value)) {
-        $full_uri->setQueryParam($key, $value);
+        $full_uri->replaceQueryParam($key, $value);
       }
     }
 

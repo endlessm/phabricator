@@ -21,6 +21,8 @@ final class PhamePostEditor
 
   public function getTransactionTypes() {
     $types = parent::getTransactionTypes();
+
+    $types[] = PhabricatorTransactions::TYPE_INTERACT_POLICY;
     $types[] = PhabricatorTransactions::TYPE_COMMENT;
 
     return $types;
@@ -61,12 +63,10 @@ final class PhamePostEditor
   }
 
   protected function buildMailTemplate(PhabricatorLiskDAO $object) {
-    $phid = $object->getPHID();
     $title = $object->getTitle();
 
     return id(new PhabricatorMetaMTAMail())
-      ->setSubject($title)
-      ->addHeader('Thread-Topic', $phid);
+      ->setSubject($title);
   }
 
   protected function buildReplyHandler(PhabricatorLiskDAO $object) {

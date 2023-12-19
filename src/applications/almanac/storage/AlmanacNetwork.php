@@ -6,10 +6,10 @@ final class AlmanacNetwork
     PhabricatorApplicationTransactionInterface,
     PhabricatorPolicyInterface,
     PhabricatorDestructibleInterface,
-    PhabricatorNgramsInterface {
+    PhabricatorNgramsInterface,
+    PhabricatorConduitResultInterface {
 
   protected $name;
-  protected $mailKey;
   protected $viewPolicy;
   protected $editPolicy;
 
@@ -23,26 +23,25 @@ final class AlmanacNetwork
     return array(
       self::CONFIG_AUX_PHID => true,
       self::CONFIG_COLUMN_SCHEMA => array(
-        'name' => 'text128',
-        'mailKey' => 'bytes20',
+        'name' => 'sort128',
+      ),
+      self::CONFIG_KEY_SCHEMA => array(
+        'key_name' => array(
+            'columns' => array('name'),
+            'unique' => true,
+          ),
       ),
     ) + parent::getConfiguration();
   }
 
-  public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(AlmanacNetworkPHIDType::TYPECONST);
-  }
-
-  public function save() {
-    if (!$this->mailKey) {
-      $this->mailKey = Filesystem::readRandomCharacters(20);
-    }
-
-    return parent::save();
+  public function getPHIDType() {
+    return AlmanacNetworkPHIDType::TYPECONST;
   }
 
   public function getURI() {
-    return '/almanac/network/'.$this->getID().'/';
+    return urisprintf(
+      '/almanac/network/%s/',
+      $this->getID());
   }
 
 
@@ -53,19 +52,8 @@ final class AlmanacNetwork
     return new AlmanacNetworkEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new AlmanacNetworkTransaction();
-  }
-
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-
-    return $timeline;
   }
 
 
@@ -120,6 +108,29 @@ final class AlmanacNetwork
       id(new AlmanacNetworkNameNgrams())
         ->setValue($this->getName()),
     );
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('name')
+        ->setType('string')
+        ->setDescription(pht('The name of the network.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    return array(
+      'name' => $this->getName(),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array();
   }
 
 }

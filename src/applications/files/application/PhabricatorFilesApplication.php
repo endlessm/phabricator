@@ -69,26 +69,41 @@ final class PhabricatorFilesApplication extends PhabricatorApplication {
 
   public function getRoutes() {
     return array(
-      '/F(?P<id>[1-9]\d*)' => 'PhabricatorFileInfoController',
+      '/F(?P<id>[1-9]\d*)(?:\$(?P<lines>\d+(?:-\d+)?))?'
+        => 'PhabricatorFileViewController',
       '/file/' => array(
         '(query/(?P<queryKey>[^/]+)/)?' => 'PhabricatorFileListController',
+        'view/(?P<id>[1-9]\d*)/'.
+          '(?:(?P<engineKey>[^/]+)/)?'.
+          '(?:\$(?P<lines>\d+(?:-\d+)?))?'
+          => 'PhabricatorFileViewController',
+        'info/(?P<phid>[^/]+)/' => 'PhabricatorFileViewController',
         'upload/' => 'PhabricatorFileUploadController',
         'dropupload/' => 'PhabricatorFileDropUploadController',
         'compose/' => 'PhabricatorFileComposeController',
-        'comment/(?P<id>[1-9]\d*)/' => 'PhabricatorFileCommentController',
         'thread/(?P<phid>[^/]+)/' => 'PhabricatorFileLightboxController',
         'delete/(?P<id>[1-9]\d*)/' => 'PhabricatorFileDeleteController',
         $this->getEditRoutePattern('edit/')
           => 'PhabricatorFileEditController',
-        'info/(?P<phid>[^/]+)/' => 'PhabricatorFileInfoController',
         'imageproxy/' => 'PhabricatorFileImageProxyController',
         'transforms/(?P<id>[1-9]\d*)/' =>
           'PhabricatorFileTransformListController',
         'uploaddialog/(?P<single>single/)?'
           => 'PhabricatorFileUploadDialogController',
-        'download/(?P<phid>[^/]+)/' => 'PhabricatorFileDialogController',
         'iconset/(?P<key>[^/]+)/' => array(
           'select/' => 'PhabricatorFileIconSetSelectController',
+        ),
+        'document/(?P<engineKey>[^/]+)/(?P<phid>[^/]+)/'
+          => 'PhabricatorFileDocumentController',
+        'ui/' => array(
+          'detach/(?P<objectPHID>[^/]+)/(?P<filePHID>[^/]+)/'
+            => 'PhabricatorFileDetachController',
+          'curtain/' => array(
+            'list/(?P<phid>[^/]+)/'
+              => 'PhabricatorFileUICurtainListController',
+            'attach/(?P<objectPHID>[^/]+)/(?P<filePHID>[^/]+)/'
+              => 'PhabricatorFileUICurtainAttachController',
+          ),
         ),
       ) + $this->getResourceSubroutes(),
     );
@@ -102,7 +117,7 @@ final class PhabricatorFilesApplication extends PhabricatorApplication {
 
   private function getResourceSubroutes() {
     return array(
-      'data/'.
+      '(?P<kind>data|download)/'.
         '(?:@(?P<instance>[^/]+)/)?'.
         '(?P<key>[^/]+)/'.
         '(?P<phid>[^/]+)/'.
@@ -133,7 +148,7 @@ final class PhabricatorFilesApplication extends PhabricatorApplication {
 
   public function getQuicksandURIPatternBlacklist() {
     return array(
-      '/file/data/.*',
+      '/file/(data|download)/.*',
     );
   }
 

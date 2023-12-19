@@ -6,23 +6,39 @@ final class PhabricatorWorkerManagementRetryWorkflow
   protected function didConstruct() {
     $this
       ->setName('retry')
-      ->setExamples('**retry** --id __id__')
+      ->setExamples('**retry** __selectors__')
       ->setSynopsis(
         pht(
           'Retry selected tasks which previously failed permanently or '.
-          'were cancelled. Only archived, unsuccessful tasks can be '.
-          'retried.'))
-      ->setArguments($this->getTaskSelectionArguments());
+          'were cancelled. Only archived tasks can be retried.'))
+      ->setArguments(
+        array_merge(
+          array(
+            array(
+              'name' => 'repeat',
+              'help' => pht(
+                'Repeat tasks which already completed successfully.'),
+            ),
+          ),
+          $this->getTaskSelectionArguments()));
   }
 
   public function execute(PhutilArgumentParser $args) {
-    $console = PhutilConsole::getConsole();
-    $tasks = $this->loadTasks($args);
+    $is_repeat = $args->getArg('repeat');
 
+    $tasks = $this->loadTasks($args);
+    if (!$tasks) {
+      $this->logWarn(
+        pht('NO TASKS'),
+        pht('No tasks selected to retry.'));
+
+      return 0;
+    }
+
+    $retry_count = 0;
     foreach ($tasks as $task) {
       if (!$task->isArchived()) {
-        $console->writeOut(
-          "**<bg:yellow> %s </bg>** %s\n",
+        $this->logWarn(
           pht('ACTIVE'),
           pht(
             '%s is already in the active task queue.',
@@ -32,24 +48,31 @@ final class PhabricatorWorkerManagementRetryWorkflow
 
       $result_success = PhabricatorWorkerArchiveTask::RESULT_SUCCESS;
       if ($task->getResult() == $result_success) {
-        $console->writeOut(
-          "**<bg:yellow> %s </bg>** %s\n",
-          pht('SUCCEEDED'),
-          pht(
-            '%s has already succeeded, and can not be retried.',
-            $this->describeTask($task)));
-        continue;
+        if (!$is_repeat) {
+          $this->logWarn(
+            pht('SUCCEEDED'),
+            pht(
+              '%s has already succeeded, and will not be repeated. '.
+              'Use "--repeat" to repeat successful tasks.',
+              $this->describeTask($task)));
+          continue;
+        }
       }
 
       $task->unarchiveTask();
 
-      $console->writeOut(
-        "**<bg:green> %s </bg>** %s\n",
+      $this->logInfo(
         pht('QUEUED'),
         pht(
           '%s was queued for retry.',
           $this->describeTask($task)));
+
+      $retry_count++;
     }
+
+    $this->logOkay(
+      pht('DONE'),
+      pht('Queued %s task(s) for retry.', new PhutilNumber($retry_count)));
 
     return 0;
   }

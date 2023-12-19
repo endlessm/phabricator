@@ -7,8 +7,12 @@ final class DifferentialTransactionEditor
   private $isCloseByCommit;
   private $repositoryPHIDOverride = false;
   private $didExpandInlineState = false;
-  private $hasReviewTransaction = false;
-  private $affectedPaths;
+  private $firstBroadcast = false;
+  private $wasBroadcasting;
+  private $isDraftDemotion;
+
+  private $ownersDiff;
+  private $ownersChangesets;
 
   public function getEditorApplicationClass() {
     return 'PhabricatorDifferentialApplication';
@@ -27,11 +31,11 @@ final class DifferentialTransactionEditor
   }
 
   public function isFirstBroadcast() {
-    return $this->getIsNewObject();
+    return $this->firstBroadcast;
   }
 
   public function getDiffUpdateTransaction(array $xactions) {
-    $type_update = DifferentialTransaction::TYPE_UPDATE;
+    $type_update = DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE;
 
     foreach ($xactions as $xaction) {
       if ($xaction->getTransactionType() == $type_update) {
@@ -74,7 +78,6 @@ final class DifferentialTransactionEditor
     $types[] = PhabricatorTransactions::TYPE_INLINESTATE;
 
     $types[] = DifferentialTransaction::TYPE_INLINE;
-    $types[] = DifferentialTransaction::TYPE_UPDATE;
 
     return $types;
   }
@@ -86,12 +89,6 @@ final class DifferentialTransactionEditor
     switch ($xaction->getTransactionType()) {
       case DifferentialTransaction::TYPE_INLINE:
         return null;
-      case DifferentialTransaction::TYPE_UPDATE:
-        if ($this->getIsNewObject()) {
-          return null;
-        } else {
-          return $object->getActiveDiff()->getPHID();
-        }
     }
 
     return parent::getCustomTransactionOldValue($object, $xaction);
@@ -102,8 +99,6 @@ final class DifferentialTransactionEditor
     PhabricatorApplicationTransaction $xaction) {
 
     switch ($xaction->getTransactionType()) {
-      case DifferentialTransaction::TYPE_UPDATE:
-        return $xaction->getNewValue();
       case DifferentialTransaction::TYPE_INLINE:
         return null;
     }
@@ -117,28 +112,13 @@ final class DifferentialTransactionEditor
 
     switch ($xaction->getTransactionType()) {
       case DifferentialTransaction::TYPE_INLINE:
-        return;
-      case DifferentialTransaction::TYPE_UPDATE:
-        if (!$this->getIsCloseByCommit()) {
-          if ($object->isNeedsRevision() ||
-              $object->isChangePlanned() ||
-              $object->isAbandoned()) {
-            $object->setModernRevisionStatus(
-              DifferentialRevisionStatus::NEEDS_REVIEW);
-          }
-        }
+        $comment = $xaction->getComment();
 
-        $diff = $this->requireDiff($xaction->getNewValue());
+        $comment->setAttribute('editing', false);
 
-        $object->setLineCount($diff->getLineCount());
-        if ($this->repositoryPHIDOverride !== false) {
-          $object->setRepositoryPHID($this->repositoryPHIDOverride);
-        } else {
-          $object->setRepositoryPHID($diff->getRepositoryPHID());
-        }
-        $object->attachActiveDiff($diff);
-
-        // TODO: Update the `diffPHID` once we add that.
+        PhabricatorVersionedDraft::purgeDrafts(
+          $comment->getPHID(),
+          $this->getActingAsPHID());
         return;
     }
 
@@ -156,15 +136,15 @@ final class DifferentialTransactionEditor
           // built it for us so we don't need to expand it again.
           $this->didExpandInlineState = true;
           break;
-        case DifferentialRevisionAcceptTransaction::TRANSACTIONTYPE:
-        case DifferentialRevisionRejectTransaction::TRANSACTIONTYPE:
-        case DifferentialRevisionResignTransaction::TRANSACTIONTYPE:
-          // If we have a review transaction, we'll skip marking the user
-          // as "Commented" later. This should get cleaner after T10967.
-          $this->hasReviewTransaction = true;
+        case DifferentialRevisionPlanChangesTransaction::TRANSACTIONTYPE:
+          if ($xaction->getMetadataValue('draft.demote')) {
+            $this->isDraftDemotion = true;
+          }
           break;
       }
     }
+
+    $this->wasBroadcasting = $object->getShouldBroadcast();
 
     return parent::expandTransactions($object, $xactions);
   }
@@ -181,64 +161,46 @@ final class DifferentialTransactionEditor
 
     $edge_ref_task = DifferentialRevisionHasTaskEdgeType::EDGECONST;
 
-    $is_sticky_accept = PhabricatorEnv::getEnvConfig(
-      'differential.sticky-accept');
-
-    $downgrade_rejects = false;
-    $downgrade_accepts = false;
+    $want_downgrade = array();
+    $must_downgrade = array();
     if ($this->getIsCloseByCommit()) {
       // Never downgrade reviewers when we're closing a revision after a
       // commit.
     } else {
       switch ($xaction->getTransactionType()) {
-        case DifferentialTransaction::TYPE_UPDATE:
-          $downgrade_rejects = true;
-          if (!$is_sticky_accept) {
-            // If "sticky accept" is disabled, also downgrade the accepts.
-            $downgrade_accepts = true;
-          }
+        case DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE:
+          $want_downgrade[] = DifferentialReviewerStatus::STATUS_ACCEPTED;
+          $want_downgrade[] = DifferentialReviewerStatus::STATUS_REJECTED;
           break;
         case DifferentialRevisionRequestReviewTransaction::TRANSACTIONTYPE:
-          $downgrade_rejects = true;
-          if ((!$is_sticky_accept) ||
-              (!$object->isChangePlanned())) {
-            // If the old state isn't "changes planned", downgrade the accepts.
-            // This exception allows an accepted revision to go through
-            // "Plan Changes" -> "Request Review" and return to "accepted" if
-            // the author didn't update the revision, essentially undoing the
-            // "Plan Changes".
-            $downgrade_accepts = true;
+          if (!$object->isChangePlanned()) {
+            // If the old state isn't "Changes Planned", downgrade the accepts
+            // even if they're sticky.
+
+            // We don't downgrade for "Changes Planned" to allow an author to
+            // undo a "Plan Changes" by immediately following it up with a
+            // "Request Review".
+            $want_downgrade[] = DifferentialReviewerStatus::STATUS_ACCEPTED;
+            $must_downgrade[] = DifferentialReviewerStatus::STATUS_ACCEPTED;
           }
+          $want_downgrade[] = DifferentialReviewerStatus::STATUS_REJECTED;
           break;
       }
     }
 
-    $new_accept = DifferentialReviewerStatus::STATUS_ACCEPTED;
-    $new_reject = DifferentialReviewerStatus::STATUS_REJECTED;
-    $old_accept = DifferentialReviewerStatus::STATUS_ACCEPTED_OLDER;
-    $old_reject = DifferentialReviewerStatus::STATUS_REJECTED_OLDER;
-
-    $downgrade = array();
-    if ($downgrade_accepts) {
-      $downgrade[] = DifferentialReviewerStatus::STATUS_ACCEPTED;
-    }
-
-    if ($downgrade_rejects) {
-      $downgrade[] = DifferentialReviewerStatus::STATUS_REJECTED;
-    }
-
-    if ($downgrade) {
+    if ($want_downgrade) {
       $void_type = DifferentialRevisionVoidTransaction::TRANSACTIONTYPE;
 
       $results[] = id(new DifferentialTransaction())
         ->setTransactionType($void_type)
         ->setIgnoreOnNoEffect(true)
-        ->setNewValue($downgrade);
+        ->setMetadataValue('void.force', $must_downgrade)
+        ->setNewValue($want_downgrade);
     }
 
-    $is_commandeer = false;
+    $new_author_phid = null;
     switch ($xaction->getTransactionType()) {
-      case DifferentialTransaction::TYPE_UPDATE:
+      case DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE:
         if ($this->getIsCloseByCommit()) {
           // Don't bother with any of this if this update is a side effect of
           // commit detection.
@@ -277,50 +239,41 @@ final class DifferentialTransactionEditor
         break;
 
       case DifferentialRevisionCommandeerTransaction::TRANSACTIONTYPE:
-        $is_commandeer = true;
+        $new_author_phid = $actor_phid;
         break;
+
+      case DifferentialRevisionAuthorTransaction::TRANSACTIONTYPE:
+        $new_author_phid = $xaction->getNewValue();
+        break;
+
     }
 
-    if ($is_commandeer) {
-      $results[] = $this->newCommandeerReviewerTransaction($object);
+    if ($new_author_phid) {
+      $swap_xaction = $this->newSwapReviewersTransaction(
+        $object,
+        $new_author_phid);
+      if ($swap_xaction) {
+        $results[] = $swap_xaction;
+      }
     }
 
     if (!$this->didExpandInlineState) {
       switch ($xaction->getTransactionType()) {
         case PhabricatorTransactions::TYPE_COMMENT:
-        case DifferentialTransaction::TYPE_UPDATE:
+        case DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE:
         case DifferentialTransaction::TYPE_INLINE:
           $this->didExpandInlineState = true;
 
-          $actor_phid = $this->getActingAsPHID();
-          $actor_is_author = ($object->getAuthorPHID() == $actor_phid);
-          if (!$actor_is_author) {
-            break;
+          $query_template = id(new DifferentialDiffInlineCommentQuery())
+            ->withRevisionPHIDs(array($object->getPHID()));
+
+          $state_xaction = $this->newInlineStateTransaction(
+            $object,
+            $query_template);
+
+          if ($state_xaction) {
+            $results[] = $state_xaction;
           }
-
-          $state_map = PhabricatorTransactions::getInlineStateMap();
-
-          $inlines = id(new DifferentialDiffInlineCommentQuery())
-            ->setViewer($this->getActor())
-            ->withRevisionPHIDs(array($object->getPHID()))
-            ->withFixedStates(array_keys($state_map))
-            ->execute();
-
-          if (!$inlines) {
-            break;
-          }
-
-          $old_value = mpull($inlines, 'getFixedState', 'getPHID');
-          $new_value = array();
-          foreach ($old_value as $key => $state) {
-            $new_value[$key] = $state_map[$state];
-          }
-
-          $results[] = id(new DifferentialTransaction())
-            ->setTransactionType(PhabricatorTransactions::TYPE_INLINESTATE)
-            ->setIgnoreOnNoEffect(true)
-            ->setOldValue($old_value)
-            ->setNewValue($new_value);
           break;
       }
     }
@@ -338,44 +291,6 @@ final class DifferentialTransactionEditor
         if ($reply && !$reply->getHasReplies()) {
           $reply->setHasReplies(1)->save();
         }
-        return;
-      case DifferentialTransaction::TYPE_UPDATE:
-        // Now that we're inside the transaction, do a final check.
-        $diff = $this->requireDiff($xaction->getNewValue());
-
-        // TODO: It would be slightly cleaner to just revalidate this
-        // transaction somehow using the same validation code, but that's
-        // not easy to do at the moment.
-
-        $revision_id = $diff->getRevisionID();
-        if ($revision_id && ($revision_id != $object->getID())) {
-          throw new Exception(
-            pht(
-              'Diff is already attached to another revision. You lost '.
-              'a race?'));
-        }
-
-        // TODO: This can race with diff updates, particularly those from
-        // Harbormaster. See discussion in T8650.
-        $diff->setRevisionID($object->getID());
-        $diff->save();
-
-        // Update Harbormaster to set the containerPHID correctly for any
-        // existing buildables. We may otherwise have buildables stuck with
-        // the old (`null`) container.
-
-        // TODO: This is a bit iffy, maybe we can find a cleaner approach?
-        // In particular, this could (rarely) be overwritten by Harbormaster
-        // workers.
-        $table = new HarbormasterBuildable();
-        $conn_w = $table->establishConnection('w');
-        queryfx(
-          $conn_w,
-          'UPDATE %T SET containerPHID = %s WHERE buildablePHID = %s',
-          $table->getTableName(),
-          $object->getPHID(),
-          $diff->getPHID());
-
         return;
     }
 
@@ -425,21 +340,57 @@ final class DifferentialTransactionEditor
         pht('Failed to load revision from transaction finalization.'));
     }
 
+    $active_diff = $new_revision->getActiveDiff();
+    $new_diff_phid = $active_diff->getPHID();
+
     $object->attachReviewers($new_revision->getReviewers());
-    $object->attachActiveDiff($new_revision->getActiveDiff());
+    $object->attachActiveDiff($active_diff);
     $object->attachRepository($new_revision->getRepository());
+
+    $has_new_diff = false;
+    $should_index_paths = false;
+    $should_index_hashes = false;
+    $need_changesets = false;
 
     foreach ($xactions as $xaction) {
       switch ($xaction->getTransactionType()) {
-        case DifferentialTransaction::TYPE_UPDATE:
-          $diff = $this->requireDiff($xaction->getNewValue(), true);
+        case DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE:
+          $need_changesets = true;
 
-          // Update these denormalized index tables when we attach a new
-          // diff to a revision.
+          $new_diff_phid = $xaction->getNewValue();
+          $has_new_diff = true;
 
-          $this->updateRevisionHashTable($object, $diff);
-          $this->updateAffectedPathTable($object, $diff);
+          $should_index_paths = true;
+          $should_index_hashes = true;
           break;
+        case DifferentialRevisionRepositoryTransaction::TRANSACTIONTYPE:
+          // The "AffectedPath" table denormalizes the repository, so we
+          // want to update the index if the repository changes.
+
+          $need_changesets = true;
+
+          $should_index_paths = true;
+          break;
+      }
+    }
+
+    if ($need_changesets) {
+      $new_diff = $this->requireDiff($new_diff_phid, true);
+
+      if ($should_index_paths) {
+        id(new DifferentialAffectedPathEngine())
+          ->setRevision($object)
+          ->setDiff($new_diff)
+          ->updateAffectedPaths();
+      }
+
+      if ($should_index_hashes) {
+        $this->updateRevisionHashTable($object, $new_diff);
+      }
+
+      if ($has_new_diff) {
+        $this->ownersDiff = $new_diff;
+        $this->ownersChangesets = $new_diff->getChangesets();
       }
     }
 
@@ -519,6 +470,11 @@ final class DifferentialTransactionEditor
       // conditions for acceptance. This usually happens after an accepting
       // reviewer resigns or is removed.
       $new_status = DifferentialRevisionStatus::NEEDS_REVIEW;
+    } else if ($was_revision) {
+      // This revision was "Needs Revision", but no longer has any rejecting
+      // reviewers. This usually happens after the last rejecting reviewer
+      // resigns or is removed. Put the revision back in "Needs Review".
+      $new_status = DifferentialRevisionStatus::NEEDS_REVIEW;
     }
 
     if ($new_status === null) {
@@ -548,44 +504,6 @@ final class DifferentialTransactionEditor
     return $xactions;
   }
 
-
-  protected function validateTransaction(
-    PhabricatorLiskDAO $object,
-    $type,
-    array $xactions) {
-
-    $errors = parent::validateTransaction($object, $type, $xactions);
-
-    $config_self_accept_key = 'differential.allow-self-accept';
-    $allow_self_accept = PhabricatorEnv::getEnvConfig($config_self_accept_key);
-
-    foreach ($xactions as $xaction) {
-      switch ($type) {
-        case DifferentialTransaction::TYPE_UPDATE:
-          $diff = $this->loadDiff($xaction->getNewValue());
-          if (!$diff) {
-            $errors[] = new PhabricatorApplicationTransactionValidationError(
-              $type,
-              pht('Invalid'),
-              pht('The specified diff does not exist.'),
-              $xaction);
-          } else if (($diff->getRevisionID()) &&
-            ($diff->getRevisionID() != $object->getID())) {
-            $errors[] = new PhabricatorApplicationTransactionValidationError(
-              $type,
-              pht('Invalid'),
-              pht(
-                'You can not update this revision to the specified diff, '.
-                'because the diff is already attached to another revision.'),
-              $xaction);
-          }
-          break;
-      }
-    }
-
-    return $errors;
-  }
-
   protected function sortTransactions(array $xactions) {
     $xactions = parent::sortTransactions($xactions);
 
@@ -608,7 +526,7 @@ final class DifferentialTransactionEditor
     PhabricatorLiskDAO $object,
     array $xactions) {
 
-    if (!$object->shouldBroadcast()) {
+    if (!$object->getShouldBroadcast()) {
       return false;
     }
 
@@ -618,20 +536,55 @@ final class DifferentialTransactionEditor
   protected function shouldSendMail(
     PhabricatorLiskDAO $object,
     array $xactions) {
-
-    if (!$object->shouldBroadcast()) {
-      return false;
-    }
-
     return true;
   }
 
   protected function getMailTo(PhabricatorLiskDAO $object) {
-    $phids = array();
-    $phids[] = $object->getAuthorPHID();
-    foreach ($object->getReviewers() as $reviewer) {
-      $phids[] = $reviewer->getReviewerPHID();
+    if ($object->getShouldBroadcast()) {
+      $this->requireReviewers($object);
+
+      $phids = array();
+      $phids[] = $object->getAuthorPHID();
+      foreach ($object->getReviewers() as $reviewer) {
+        if ($reviewer->isResigned()) {
+          continue;
+        }
+
+        $phids[] = $reviewer->getReviewerPHID();
+      }
+      return $phids;
     }
+
+    // If we're demoting a draft after a build failure, just notify the author.
+    if ($this->isDraftDemotion) {
+      $author_phid = $object->getAuthorPHID();
+      return array(
+        $author_phid,
+      );
+    }
+
+    return array();
+  }
+
+  protected function getMailCC(PhabricatorLiskDAO $object) {
+    if (!$object->getShouldBroadcast()) {
+      return array();
+    }
+
+    return parent::getMailCC($object);
+  }
+
+  protected function newMailUnexpandablePHIDs(PhabricatorLiskDAO $object) {
+    $this->requireReviewers($object);
+
+    $phids = array();
+
+    foreach ($object->getReviewers() as $reviewer) {
+      if ($reviewer->isResigned()) {
+        $phids[] = $reviewer->getReviewerPHID();
+      }
+    }
+
     return $phids;
   }
 
@@ -648,7 +601,7 @@ final class DifferentialTransactionEditor
       $action = parent::getMailAction($object, $xactions);
 
       $strongest = $this->getStrongestAction($object, $xactions);
-      $type_update = DifferentialTransaction::TYPE_UPDATE;
+      $type_update = DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE;
       if ($strongest->getTransactionType() == $type_update) {
         $show_lines = true;
       }
@@ -656,14 +609,14 @@ final class DifferentialTransactionEditor
 
     if ($show_lines) {
       $count = new PhutilNumber($object->getLineCount());
-      $action = pht('%s, %s line(s)', $action, $count);
+      $action = pht('%s] [%s', $action, $object->getRevisionScaleGlyphs());
     }
 
     return $action;
   }
 
   protected function getMailSubjectPrefix() {
-    return PhabricatorEnv::getEnvConfig('metamta.differential.subject-prefix');
+    return pht('[Differential]');
   }
 
   protected function getMailThreadID(PhabricatorLiskDAO $object) {
@@ -678,17 +631,32 @@ final class DifferentialTransactionEditor
   }
 
   protected function buildMailTemplate(PhabricatorLiskDAO $object) {
-    $id = $object->getID();
+    $monogram = $object->getMonogram();
     $title = $object->getTitle();
 
-    $original_title = $object->getOriginalTitle();
-
-    $subject = "D{$id}: {$title}";
-    $thread_topic = "D{$id}: {$original_title}";
-
     return id(new PhabricatorMetaMTAMail())
-      ->setSubject($subject)
-      ->addHeader('Thread-Topic', $thread_topic);
+      ->setSubject(pht('%s: %s', $monogram, $title))
+      ->setMustEncryptSubject(pht('%s: Revision Updated', $monogram))
+      ->setMustEncryptURI($object->getURI());
+  }
+
+  protected function getTransactionsForMail(
+    PhabricatorLiskDAO $object,
+    array $xactions) {
+    // If this is the first time we're sending mail about this revision, we
+    // generate mail for all prior transactions, not just whatever is being
+    // applied now. This gets the "added reviewers" lines and other relevant
+    // information into the mail.
+    if ($this->isFirstBroadcast()) {
+      return $this->loadUnbroadcastTransactions($object);
+    }
+
+    return $xactions;
+  }
+
+  protected function getObjectLinkButtonLabelForMail(
+    PhabricatorLiskDAO $object) {
+    return pht('View Revision');
   }
 
   protected function buildMailBody(
@@ -697,23 +665,16 @@ final class DifferentialTransactionEditor
 
     $viewer = $this->requireActor();
 
-    // If this is the first time we're sending mail about this revision, we
-    // generate mail for all prior transactions, not just whatever is being
-    // applied now. This gets the "added reviewers" lines and other relevant
-    // information into the mail.
-    if ($this->isFirstBroadcast()) {
-      $xactions = $this->loadUnbroadcastTransactions($object);
-    }
+    $body = id(new PhabricatorMetaMTAMailBody())
+      ->setViewer($viewer);
 
-    $body = new PhabricatorMetaMTAMailBody();
-    $body->setViewer($this->requireActor());
-
-    $revision_uri = PhabricatorEnv::getProductionURI('/D'.$object->getID());
+    $revision_uri = $this->getObjectLinkButtonURIForMail($object);
+    $new_uri = $revision_uri.'/new/';
 
     $this->addHeadersAndCommentsToMailBody(
       $body,
       $xactions,
-      pht('View Revision'),
+      $this->getObjectLinkButtonLabelForMail($object),
       $revision_uri);
 
     $type_inline = DifferentialTransaction::TYPE_INLINE;
@@ -729,6 +690,21 @@ final class DifferentialTransactionEditor
       $this->appendInlineCommentsForMail($object, $inlines, $body);
     }
 
+    $update_xaction = null;
+    foreach ($xactions as $xaction) {
+      switch ($xaction->getTransactionType()) {
+        case DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE:
+          $update_xaction = $xaction;
+          break;
+      }
+    }
+
+    if ($update_xaction) {
+      $diff = $this->requireDiff($update_xaction->getNewValue(), true);
+    } else {
+      $diff = null;
+    }
+
     $changed_uri = $this->getChangedPriorToCommitURI();
     if ($changed_uri) {
       $body->addLinkSection(
@@ -738,22 +714,15 @@ final class DifferentialTransactionEditor
 
     $this->addCustomFieldsToMailBody($body, $object, $xactions);
 
+    if (!$this->isFirstBroadcast()) {
+      $body->addLinkSection(pht('CHANGES SINCE LAST ACTION'), $new_uri);
+    }
+
     $body->addLinkSection(
       pht('REVISION DETAIL'),
       $revision_uri);
 
-    $update_xaction = null;
-    foreach ($xactions as $xaction) {
-      switch ($xaction->getTransactionType()) {
-        case DifferentialTransaction::TYPE_UPDATE:
-          $update_xaction = $xaction;
-          break;
-      }
-    }
-
     if ($update_xaction) {
-      $diff = $this->requireDiff($update_xaction->getNewValue(), true);
-
       $body->addTextSection(
         pht('AFFECTED FILES'),
         $this->renderAffectedFilesForMail($diff));
@@ -767,8 +736,13 @@ final class DifferentialTransactionEditor
       if ($config_inline || $config_attach) {
         $body_limit = PhabricatorEnv::getEnvConfig('metamta.email-body-limit');
 
-        $patch = $this->buildPatchForMail($diff);
-        if ($config_inline) {
+        try {
+          $patch = $this->buildPatchForMail($diff, $body_limit);
+        } catch (ArcanistDiffByteSizeException $ex) {
+          $patch = null;
+        }
+
+        if (($patch !== null) && $config_inline) {
           $lines = substr_count($patch, "\n");
           $bytes = strlen($patch);
 
@@ -791,14 +765,14 @@ final class DifferentialTransactionEditor
           }
         }
 
-        if ($config_attach) {
+        if (($patch !== null) && $config_attach) {
           // See T12033, T11767, and PHI55. This is a crude fix to stop the
           // major concrete problems that lackluster email size limits cause.
           if (strlen($patch) < $body_limit) {
             $name = pht('D%s.%s.patch', $object->getID(), $diff->getID());
             $mime_type = 'text/x-patch; charset=utf-8';
             $body->addAttachment(
-              new PhabricatorMetaMTAAttachment($patch, $name, $mime_type));
+              new PhabricatorMailAttachment($patch, $name, $mime_type));
           }
         }
       }
@@ -904,7 +878,34 @@ final class DifferentialTransactionEditor
       }
     }
 
-    $this->setUnmentionablePHIDMap(array_merge($task_phids, $rev_phids));
+    $revert_refs = id(new DifferentialCustomFieldRevertsParser())
+      ->parseCorpus($content_block);
+
+    $revert_monograms = array();
+    foreach ($revert_refs as $match) {
+      foreach ($match['monograms'] as $monogram) {
+        $revert_monograms[] = $monogram;
+      }
+    }
+
+    if ($revert_monograms) {
+      $revert_objects = DiffusionCommitRevisionQuery::loadRevertedObjects(
+        $this->getActor(),
+        $object,
+        $revert_monograms,
+        null);
+
+      $revert_phids = mpull($revert_objects, 'getPHID', 'getPHID');
+
+      $revert_type = DiffusionCommitRevertsCommitEdgeType::EDGECONST;
+      $edges[$revert_type] = $revert_phids;
+    } else {
+      $revert_phids = array();
+    }
+
+    $this->addUnmentionablePHIDs($task_phids);
+    $this->addUnmentionablePHIDs($rev_phids);
+    $this->addUnmentionablePHIDs($revert_phids);
 
     $result = array();
     foreach ($edges as $type => $specs) {
@@ -922,6 +923,17 @@ final class DifferentialTransactionEditor
     array $inlines,
     PhabricatorMetaMTAMailBody $body) {
 
+    $limit = 100;
+    $limit_note = null;
+    if (count($inlines) > $limit) {
+      $limit_note = pht(
+        '(Showing first %s of %s inline comments.)',
+        new PhutilNumber($limit),
+        phutil_count($inlines));
+
+      $inlines = array_slice($inlines, 0, $limit, true);
+    }
+
     $section = id(new DifferentialInlineCommentMailView())
       ->setViewer($this->getActor())
       ->setInlines($inlines)
@@ -930,6 +942,9 @@ final class DifferentialTransactionEditor
     $header = pht('INLINE COMMENTS');
 
     $section_text = "\n".$section->getPlaintext();
+    if ($limit_note) {
+      $section_text = $limit_note."\n".$section_text;
+    }
 
     $style = array(
       'margin: 6px 0 12px 0;',
@@ -941,6 +956,16 @@ final class DifferentialTransactionEditor
         'style' => implode(' ', $style),
       ),
       $section->getHTML());
+
+    if ($limit_note) {
+      $section_html = array(
+        phutil_tag(
+          'em',
+          array(),
+          $limit_note),
+        $section_html,
+      );
+    }
 
     $body->addPlaintextSection($header, $section_text, false);
     $body->addHTMLSection($header, $section_html);
@@ -989,7 +1014,7 @@ final class DifferentialTransactionEditor
     return $query->executeOne();
   }
 
-  private function requireDiff($phid, $need_changesets = false) {
+  public function requireDiff($phid, $need_changesets = false) {
     $diff = $this->loadDiff($phid, $need_changesets);
     if (!$diff) {
       throw new Exception(pht('Diff "%s" does not exist!', $phid));
@@ -1003,26 +1028,7 @@ final class DifferentialTransactionEditor
   protected function shouldApplyHeraldRules(
     PhabricatorLiskDAO $object,
     array $xactions) {
-
-    if ($this->getIsNewObject()) {
-      return true;
-    }
-
-    foreach ($xactions as $xaction) {
-      switch ($xaction->getTransactionType()) {
-        case DifferentialTransaction::TYPE_UPDATE:
-          if (!$this->getIsCloseByCommit()) {
-            return true;
-          }
-          break;
-        case DifferentialRevisionCommandeerTransaction::TRANSACTIONTYPE:
-          // When users commandeer revisions, we may need to trigger
-          // signatures or author-based rules.
-          return true;
-      }
-    }
-
-    return parent::shouldApplyHeraldRules($object, $xactions);
+    return true;
   }
 
   protected function didApplyHeraldRules(
@@ -1035,36 +1041,61 @@ final class DifferentialTransactionEditor
       return array();
     }
 
-    if (!$this->affectedPaths) {
+    $diff = $this->ownersDiff;
+    $changesets = $this->ownersChangesets;
+
+    $this->ownersDiff = null;
+    $this->ownersChangesets = null;
+
+    if (!$changesets) {
       return array();
     }
 
-    $packages = PhabricatorOwnersPackage::loadAffectedPackages(
+    $packages = PhabricatorOwnersPackage::loadAffectedPackagesForChangesets(
       $repository,
-      $this->affectedPaths);
+      $diff,
+      $changesets);
     if (!$packages) {
       return array();
     }
 
-    // Remove packages that the revision author is an owner of. If you own
-    // code, you don't need another owner to review it.
-    $authority = id(new PhabricatorOwnersPackageQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
-      ->withPHIDs(mpull($packages, 'getPHID'))
-      ->withAuthorityPHIDs(array($object->getAuthorPHID()))
-      ->execute();
-    $authority = mpull($authority, null, 'getPHID');
+    // Identify the packages with "Non-Owner Author" review rules and remove
+    // them if the author has authority over the package.
 
-    foreach ($packages as $key => $package) {
-      $package_phid = $package->getPHID();
-      if (isset($authority[$package_phid])) {
-        unset($packages[$key]);
+    $autoreview_map = PhabricatorOwnersPackage::getAutoreviewOptionsMap();
+    $need_authority = array();
+    foreach ($packages as $package) {
+      $autoreview_setting = $package->getAutoReview();
+
+      $spec = idx($autoreview_map, $autoreview_setting);
+      if (!$spec) {
         continue;
+      }
+
+      if (idx($spec, 'authority')) {
+        $need_authority[$package->getPHID()] = $package->getPHID();
       }
     }
 
-    if (!$packages) {
-      return array();
+    if ($need_authority) {
+      $authority = id(new PhabricatorOwnersPackageQuery())
+        ->setViewer(PhabricatorUser::getOmnipotentUser())
+        ->withPHIDs($need_authority)
+        ->withAuthorityPHIDs(array($object->getAuthorPHID()))
+        ->execute();
+      $authority = mpull($authority, null, 'getPHID');
+
+      foreach ($packages as $key => $package) {
+        $package_phid = $package->getPHID();
+        if (isset($authority[$package_phid])) {
+          unset($packages[$key]);
+          continue;
+        }
+      }
+
+      if (!$packages) {
+        return array();
+      }
     }
 
     $auto_subscribe = array();
@@ -1073,14 +1104,17 @@ final class DifferentialTransactionEditor
 
     foreach ($packages as $package) {
       switch ($package->getAutoReview()) {
-        case PhabricatorOwnersPackage::AUTOREVIEW_SUBSCRIBE:
-          $auto_subscribe[] = $package;
-          break;
         case PhabricatorOwnersPackage::AUTOREVIEW_REVIEW:
+        case PhabricatorOwnersPackage::AUTOREVIEW_REVIEW_ALWAYS:
           $auto_review[] = $package;
           break;
         case PhabricatorOwnersPackage::AUTOREVIEW_BLOCK:
+        case PhabricatorOwnersPackage::AUTOREVIEW_BLOCK_ALWAYS:
           $auto_block[] = $package;
+          break;
+        case PhabricatorOwnersPackage::AUTOREVIEW_SUBSCRIBE:
+        case PhabricatorOwnersPackage::AUTOREVIEW_SUBSCRIBE_ALWAYS:
+          $auto_subscribe[] = $package;
           break;
         case PhabricatorOwnersPackage::AUTOREVIEW_NONE:
         default:
@@ -1211,97 +1245,50 @@ final class DifferentialTransactionEditor
       $revision,
       $revision->getActiveDiff());
 
+    // If the object is still a draft, prevent "Send me an email" and other
+    // similar rules from acting yet.
+    if (!$object->getShouldBroadcast()) {
+      $adapter->setForbiddenAction(
+        HeraldMailableState::STATECONST,
+        DifferentialHeraldStateReasons::REASON_DRAFT);
+    }
+
+    // If this edit didn't actually change the diff (for example, a user
+    // edited the title or changed subscribers), prevent "Run build plan"
+    // and other similar rules from acting yet, since the build results will
+    // not (or, at least, should not) change unless the actual source changes.
+    // We also don't run Differential builds if the update was caused by
+    // discovering a commit, as the expectation is that Diffusion builds take
+    // over once things land.
+    $has_update = false;
+    $has_commit = false;
+
+    $type_update = DifferentialRevisionUpdateTransaction::TRANSACTIONTYPE;
+    foreach ($xactions as $xaction) {
+      if ($xaction->getTransactionType() != $type_update) {
+        continue;
+      }
+
+      if ($xaction->getMetadataValue('isCommitUpdate')) {
+        $has_commit = true;
+      } else {
+        $has_update = true;
+      }
+
+      break;
+    }
+
+    if ($has_commit) {
+      $adapter->setForbiddenAction(
+        HeraldBuildableState::STATECONST,
+        DifferentialHeraldStateReasons::REASON_LANDED);
+    } else if (!$has_update) {
+      $adapter->setForbiddenAction(
+        HeraldBuildableState::STATECONST,
+        DifferentialHeraldStateReasons::REASON_UNCHANGED);
+    }
+
     return $adapter;
-  }
-
-  /**
-   * Update the table which links Differential revisions to paths they affect,
-   * so Diffusion can efficiently find pending revisions for a given file.
-   */
-  private function updateAffectedPathTable(
-    DifferentialRevision $revision,
-    DifferentialDiff $diff) {
-
-    $repository = $revision->getRepository();
-    if (!$repository) {
-      // The repository where the code lives is untracked.
-      return;
-    }
-
-    $path_prefix = null;
-
-    $local_root = $diff->getSourceControlPath();
-    if ($local_root) {
-      // We're in a working copy which supports subdirectory checkouts (e.g.,
-      // SVN) so we need to figure out what prefix we should add to each path
-      // (e.g., trunk/projects/example/) to get the absolute path from the
-      // root of the repository. DVCS systems like Git and Mercurial are not
-      // affected.
-
-      // Normalize both paths and check if the repository root is a prefix of
-      // the local root. If so, throw it away. Note that this correctly handles
-      // the case where the remote path is "/".
-      $local_root = id(new PhutilURI($local_root))->getPath();
-      $local_root = rtrim($local_root, '/');
-
-      $repo_root = id(new PhutilURI($repository->getRemoteURI()))->getPath();
-      $repo_root = rtrim($repo_root, '/');
-
-      if (!strncmp($repo_root, $local_root, strlen($repo_root))) {
-        $path_prefix = substr($local_root, strlen($repo_root));
-      }
-    }
-
-    $changesets = $diff->getChangesets();
-    $paths = array();
-    foreach ($changesets as $changeset) {
-      $paths[] = $path_prefix.'/'.$changeset->getFilename();
-    }
-
-    // Save the affected paths; we'll use them later to query Owners. This
-    // uses the un-expanded paths.
-    $this->affectedPaths = $paths;
-
-    // Mark this as also touching all parent paths, so you can see all pending
-    // changes to any file within a directory.
-    $all_paths = array();
-    foreach ($paths as $local) {
-      foreach (DiffusionPathIDQuery::expandPathToRoot($local) as $path) {
-        $all_paths[$path] = true;
-      }
-    }
-    $all_paths = array_keys($all_paths);
-
-    $path_ids =
-      PhabricatorRepositoryCommitChangeParserWorker::lookupOrCreatePaths(
-        $all_paths);
-
-    $table = new DifferentialAffectedPath();
-    $conn_w = $table->establishConnection('w');
-
-    $sql = array();
-    foreach ($path_ids as $path_id) {
-      $sql[] = qsprintf(
-        $conn_w,
-        '(%d, %d, %d, %d)',
-        $repository->getID(),
-        $path_id,
-        time(),
-        $revision->getID());
-    }
-
-    queryfx(
-      $conn_w,
-      'DELETE FROM %T WHERE revisionID = %d',
-      $table->getTableName(),
-      $revision->getID());
-    foreach (array_chunk($sql, 256) as $chunk) {
-      queryfx(
-        $conn_w,
-        'INSERT INTO %T (repositoryID, pathID, epoch, revisionID) VALUES %Q',
-        $table->getTableName(),
-        implode(', ', $chunk));
-    }
   }
 
   /**
@@ -1375,9 +1362,9 @@ final class DifferentialTransactionEditor
     if ($sql) {
       queryfx(
         $conn_w,
-        'INSERT INTO %T (revisionID, type, hash) VALUES %Q',
+        'INSERT INTO %T (revisionID, type, hash) VALUES %LQ',
         ArcanistDifferentialRevisionHash::TABLE_NAME,
-        implode(', ', $sql));
+        $sql);
     }
   }
 
@@ -1402,13 +1389,14 @@ final class DifferentialTransactionEditor
       array('style' => 'font-family: monospace;'), $patch);
   }
 
-  private function buildPatchForMail(DifferentialDiff $diff) {
+  private function buildPatchForMail(DifferentialDiff $diff, $byte_limit) {
     $format = PhabricatorEnv::getEnvConfig('metamta.differential.patch-format');
 
     return id(new DifferentialRawDiffRenderer())
       ->setViewer($this->getActor())
       ->setFormat($format)
       ->setChangesets($diff->getChangesets())
+      ->setByteLimit($byte_limit)
       ->buildPatch();
   }
 
@@ -1425,29 +1413,37 @@ final class DifferentialTransactionEditor
   protected function getCustomWorkerState() {
     return array(
       'changedPriorToCommitURI' => $this->changedPriorToCommitURI,
+      'firstBroadcast' => $this->firstBroadcast,
+      'isDraftDemotion' => $this->isDraftDemotion,
     );
   }
 
   protected function loadCustomWorkerState(array $state) {
     $this->changedPriorToCommitURI = idx($state, 'changedPriorToCommitURI');
+    $this->firstBroadcast = idx($state, 'firstBroadcast');
+    $this->isDraftDemotion = idx($state, 'isDraftDemotion');
     return $this;
   }
 
-  private function newCommandeerReviewerTransaction(
-    DifferentialRevision $revision) {
+  private function newSwapReviewersTransaction(
+    DifferentialRevision $revision,
+    $new_author_phid) {
 
-    $actor_phid = $this->getActingAsPHID();
-    $owner_phid = $revision->getAuthorPHID();
+    $old_author_phid = $revision->getAuthorPHID();
 
-    // If the user is commandeering, add the previous owner as a
-    // reviewer and remove the actor.
+    if ($old_author_phid === $new_author_phid) {
+      return;
+    }
+
+    // If the revision is changing authorship, add the previous author as a
+    // reviewer and remove the new author.
 
     $edits = array(
       '-' => array(
-        $actor_phid,
+        $new_author_phid,
       ),
       '+' => array(
-        $owner_phid,
+        $old_author_phid,
       ),
     );
 
@@ -1463,6 +1459,7 @@ final class DifferentialTransactionEditor
       ->setIsCommandeerSideEffect(true)
       ->setNewValue($edits);
   }
+
 
   public function getActiveDiff($object) {
     if ($this->getIsNewObject()) {
@@ -1530,20 +1527,83 @@ final class DifferentialTransactionEditor
 
 
   protected function didApplyTransactions($object, array $xactions) {
+    // In a moment, we're going to try to publish draft revisions which have
+    // completed all their builds. However, we only want to do that if the
+    // actor is either the revision author or an omnipotent user (generally,
+    // the Harbormaster application).
+
+    // If we let any actor publish the revision as a side effect of other
+    // changes then an unlucky third party who innocently comments on the draft
+    // can end up racing Harbormaster and promoting the revision. At best, this
+    // is confusing. It can also run into validation problems with the "Request
+    // Review" transaction. See PHI309 for some discussion.
+    $author_phid = $object->getAuthorPHID();
+    $viewer = $this->requireActor();
+    $can_undraft =
+      ($this->getActingAsPHID() === $author_phid) ||
+      ($viewer->isOmnipotent());
+
     // If a draft revision has no outstanding builds and we're automatically
     // making drafts public after builds finish, make the revision public.
-    $auto_undraft = true;
+    if ($can_undraft) {
+      $auto_undraft = !$object->getHoldAsDraft();
+    } else {
+      $auto_undraft = false;
+    }
 
-    if ($object->isDraft() && $auto_undraft) {
-      $active_builds = $this->hasActiveBuilds($object);
-      if (!$active_builds) {
+    $can_promote = false;
+    $can_demote = false;
+
+    // "Draft" revisions can promote to "Review Requested" after builds pass,
+    // or demote to "Changes Planned" after builds fail.
+    if ($object->isDraft()) {
+      $can_promote = true;
+      $can_demote = true;
+    }
+
+    // See PHI584. "Changes Planned" revisions which are not yet broadcasting
+    // can promote to "Review Requested" if builds pass.
+
+    // This pass is presumably the result of someone restarting the builds and
+    // having them work this time, perhaps because the builds are not perfectly
+    // reliable or perhaps because someone fixed some issue with build hardware
+    // or some other dependency.
+
+    // Currently, there's no legitimate way to end up in this state except
+    // through automatic demotion, so this behavior should not generate an
+    // undue level of confusion or ambiguity. Also note that these changes can
+    // not demote again since they've already been demoted once.
+    if ($object->isChangePlanned()) {
+      if (!$object->getShouldBroadcast()) {
+        $can_promote = true;
+      }
+    }
+
+    if (($can_promote || $can_demote) && $auto_undraft) {
+      $status = $this->loadCompletedBuildableStatus($object);
+
+      $is_passed = ($status === HarbormasterBuildableStatus::STATUS_PASSED);
+      $is_failed = ($status === HarbormasterBuildableStatus::STATUS_FAILED);
+
+      if ($is_passed && $can_promote) {
+        // When Harbormaster moves a revision out of the draft state, we
+        // attribute the action to the revision author since this is more
+        // natural and more useful.
+
+        // Additionally, we change the acting PHID for the transaction set
+        // to the author if it isn't already a user so that mail comes from
+        // the natural author.
+        $acting_phid = $this->getActingAsPHID();
+        $user_type = PhabricatorPeopleUserPHIDType::TYPECONST;
+        if (phid_get_type($acting_phid) != $user_type) {
+          $this->setActingAsPHID($author_phid);
+        }
+
         $xaction = $object->getApplicationTransactionTemplate()
+          ->setAuthorPHID($author_phid)
           ->setTransactionType(
             DifferentialRevisionRequestReviewTransaction::TRANSACTIONTYPE)
-          ->setOldValue(false)
           ->setNewValue(true);
-
-        $xaction = $this->populateTransaction($object, $xaction);
 
         // If we're creating this revision and immediately moving it out of
         // the draft state, mark this as a create transaction so it gets
@@ -1553,76 +1613,77 @@ final class DifferentialTransactionEditor
           $xaction->setIsCreateTransaction(true);
         }
 
-        $object->openTransaction();
-          $object
-            ->setStatus(DifferentialRevisionStatus::NEEDS_REVIEW)
-            ->save();
+        // Queue this transaction and apply it separately after the current
+        // batch of transactions finishes so that Herald can fire on the new
+        // revision state. See T13027 for discussion.
+        $this->queueTransaction($xaction);
+      } else if ($is_failed && $can_demote) {
+        // When demoting a revision, we act as "Harbormaster" instead of
+        // the author since this feels a little more natural.
+        $harbormaster_phid = id(new PhabricatorHarbormasterApplication())
+          ->getPHID();
 
-          $xaction->save();
-        $object->saveTransaction();
+        $xaction = $object->getApplicationTransactionTemplate()
+          ->setAuthorPHID($harbormaster_phid)
+          ->setMetadataValue('draft.demote', true)
+          ->setTransactionType(
+            DifferentialRevisionPlanChangesTransaction::TRANSACTIONTYPE)
+          ->setNewValue(true);
 
-        $xactions[] = $xaction;
+        $this->queueTransaction($xaction);
+      }
+    }
+
+    // If the revision is new or was a draft, and is no longer a draft, we
+    // might be sending the first email about it.
+
+    // This might mean it was created directly into a non-draft state, or
+    // it just automatically undrafted after builds finished, or a user
+    // explicitly promoted it out of the draft state with an action like
+    // "Request Review".
+
+    // If we haven't sent any email about it yet, mark this email as the first
+    // email so the mail gets enriched with "SUMMARY" and "TEST PLAN".
+
+    $is_new = $this->getIsNewObject();
+    $was_broadcasting = $this->wasBroadcasting;
+
+    if ($object->getShouldBroadcast()) {
+      if (!$was_broadcasting || $is_new) {
+        // Mark this as the first broadcast we're sending about the revision
+        // so mail can generate specially.
+        $this->firstBroadcast = true;
       }
     }
 
     return $xactions;
   }
 
-  private function hasActiveBuilds($object) {
+  private function loadCompletedBuildableStatus(
+    DifferentialRevision $revision) {
     $viewer = $this->requireActor();
-    $diff = $object->getActiveDiff();
+    $builds = $revision->loadImpactfulBuilds($viewer);
+    return $revision->newBuildableStatusForBuilds($builds);
+  }
 
-    $buildables = id(new HarbormasterBuildableQuery())
-      ->setViewer($viewer)
-      ->withContainerPHIDs(array($object->getPHID()))
-      ->withBuildablePHIDs(array($diff->getPHID()))
-      ->withManualBuildables(false)
-      ->execute();
-    if (!$buildables) {
-      return false;
+  private function requireReviewers(DifferentialRevision $revision) {
+    if ($revision->hasAttachedReviewers()) {
+      return;
     }
 
-    $builds = id(new HarbormasterBuildQuery())
-      ->setViewer($viewer)
-      ->withBuildablePHIDs(mpull($buildables, 'getPHID'))
-      ->withBuildStatuses(
-        array(
-          HarbormasterBuildStatus::STATUS_INACTIVE,
-          HarbormasterBuildStatus::STATUS_PENDING,
-          HarbormasterBuildStatus::STATUS_BUILDING,
-          HarbormasterBuildStatus::STATUS_FAILED,
-          HarbormasterBuildStatus::STATUS_ABORTED,
-          HarbormasterBuildStatus::STATUS_ERROR,
-          HarbormasterBuildStatus::STATUS_PAUSED,
-          HarbormasterBuildStatus::STATUS_DEADLOCKED,
-        ))
-      ->needBuildTargets(true)
-      ->execute();
-    if (!$builds) {
-      return false;
+    $with_reviewers = id(new DifferentialRevisionQuery())
+      ->setViewer($this->getActor())
+      ->needReviewers(true)
+      ->withPHIDs(array($revision->getPHID()))
+      ->executeOne();
+    if (!$with_reviewers) {
+      throw new Exception(
+        pht(
+          'Failed to reload revision ("%s").',
+          $revision->getPHID()));
     }
 
-    $active = array();
-    foreach ($builds as $key => $build) {
-      foreach ($build->getBuildTargets() as $target) {
-        if ($target->isAutotarget()) {
-          // Ignore autotargets when looking for active of failed builds. If
-          // local tests fail and you continue anyway, you don't need to
-          // double-confirm them.
-          continue;
-        }
-
-        // This build has at least one real target that's doing something.
-        $active[$key] = $build;
-        break;
-      }
-    }
-
-    if (!$active) {
-      return false;
-    }
-
-    return true;
+    $revision->attachReviewers($with_reviewers->getReviewers());
   }
 
 

@@ -104,15 +104,29 @@ final class DiffusionServeController extends DiffusionController {
     try {
       $remote_addr = $request->getRemoteAddress();
 
+      if ($request->isHTTPS()) {
+        $remote_protocol = PhabricatorRepositoryPullEvent::PROTOCOL_HTTPS;
+      } else {
+        $remote_protocol = PhabricatorRepositoryPullEvent::PROTOCOL_HTTP;
+      }
+
       $pull_event = id(new PhabricatorRepositoryPullEvent())
         ->setEpoch(PhabricatorTime::getNow())
         ->setRemoteAddress($remote_addr)
-        ->setRemoteProtocol('http');
+        ->setRemoteProtocol($remote_protocol);
 
       if ($response) {
-        $pull_event
-          ->setResultType('wild')
-          ->setResultCode($response->getHTTPResponseCode());
+        $response_code = $response->getHTTPResponseCode();
+
+        if ($response_code == 200) {
+          $pull_event
+            ->setResultType(PhabricatorRepositoryPullEvent::RESULT_PULL)
+            ->setResultCode($response_code);
+        } else {
+          $pull_event
+            ->setResultType(PhabricatorRepositoryPullEvent::RESULT_ERROR)
+            ->setResultCode($response_code);
+        }
 
         if ($response instanceof PhabricatorVCSResponse) {
           $pull_event->setProperties(
@@ -122,7 +136,7 @@ final class DiffusionServeController extends DiffusionController {
         }
       } else {
         $pull_event
-          ->setResultType('exception')
+          ->setResultType(PhabricatorRepositoryPullEvent::RESULT_EXCEPTION)
           ->setResultCode(500)
           ->setProperties(
             array(
@@ -178,7 +192,10 @@ final class DiffusionServeController extends DiffusionController {
       // Try Git LFS auth first since we can usually reject it without doing
       // any queries, since the username won't match the one we expect or the
       // request won't be LFS.
-      $viewer = $this->authenticateGitLFSUser($username, $password);
+      $viewer = $this->authenticateGitLFSUser(
+        $username,
+        $password,
+        $identifier);
 
       // If that failed, try normal auth. Note that we can use normal auth on
       // LFS requests, so this isn't strictly an alternative to LFS auth.
@@ -196,6 +213,11 @@ final class DiffusionServeController extends DiffusionController {
       // being "not logged in".
       $viewer = new PhabricatorUser();
     }
+
+    // See T13590. Some pathways, like error handling, may require unusual
+    // access to things like timezone information. These are fine to build
+    // inline; this pathway is not lightweight anyway.
+    $viewer->setAllowInlineCacheGeneration(true);
 
     $this->setServiceViewer($viewer);
 
@@ -285,6 +307,12 @@ final class DiffusionServeController extends DiffusionController {
       }
 
       if ($is_push) {
+        if ($repository->isReadOnly()) {
+          return new PhabricatorVCSResponse(
+            503,
+            $repository->getReadOnlyMessageForDisplay());
+        }
+
         $can_write =
           $repository->canServeProtocol($proto_https, true) ||
           $repository->canServeProtocol($proto_http, true);
@@ -369,13 +397,31 @@ final class DiffusionServeController extends DiffusionController {
       switch ($vcs_type) {
         case PhabricatorRepositoryType::REPOSITORY_TYPE_GIT:
         case PhabricatorRepositoryType::REPOSITORY_TYPE_MERCURIAL:
-          $result = $this->serveVCSRequest($repository, $viewer);
+          $caught = null;
+          try {
+            $result = $this->serveVCSRequest($repository, $viewer);
+          } catch (Exception $ex) {
+            $caught = $ex;
+          } catch (Throwable $ex) {
+            $caught = $ex;
+          }
+
+          if ($caught) {
+            // We never expect an uncaught exception here, so dump it to the
+            // log. All routine errors should have been converted into Response
+            // objects by a lower layer.
+            phlog($caught);
+
+            $result = new PhabricatorVCSResponse(
+              500,
+              phutil_string_cast($caught->getMessage()));
+          }
           break;
         case PhabricatorRepositoryType::REPOSITORY_TYPE_SVN:
           $result = new PhabricatorVCSResponse(
             500,
             pht(
-              'Phabricator does not support HTTP access to Subversion '.
+              'This server does not support HTTP access to Subversion '.
               'repositories.'));
           break;
         default:
@@ -417,10 +463,13 @@ final class DiffusionServeController extends DiffusionController {
 
     $uri = $repository->getAlmanacServiceURI(
       $viewer,
-      $is_cluster_request,
       array(
-        'http',
-        'https',
+        'neverProxy' => $is_cluster_request,
+        'protocols' => array(
+          'http',
+          'https',
+        ),
+        'writable' => !$this->isReadOnlyRequest($repository),
       ));
     if ($uri) {
       $future = $this->getRequest()->newClusterProxyFuture($uri);
@@ -511,7 +560,7 @@ final class DiffusionServeController extends DiffusionController {
         unset($query_data[$key]);
       }
     }
-    $query_string = http_build_query($query_data, '', '&');
+    $query_string = phutil_build_http_querystring($query_data);
 
     // We're about to wipe out PATH with the rest of the environment, so
     // resolve the binary first.
@@ -638,7 +687,8 @@ final class DiffusionServeController extends DiffusionController {
 
   private function authenticateGitLFSUser(
     $username,
-    PhutilOpaqueEnvelope $password) {
+    PhutilOpaqueEnvelope $password,
+    $identifier) {
 
     // Never accept these credentials for requests which aren't LFS requests.
     if (!$this->getIsGitLFSRequest()) {
@@ -651,11 +701,31 @@ final class DiffusionServeController extends DiffusionController {
       return null;
     }
 
+    // See PHI1123. We need to be able to constrain the token query with
+    // "withTokenResources(...)" to take advantage of the key on the table.
+    // In this case, the repository PHID is the "resource" we're after.
+
+    // In normal workflows, we figure out the viewer first, then use the
+    // viewer to load the repository, but that won't work here. Load the
+    // repository as the omnipotent viewer, then use the repository PHID to
+    // look for a token.
+
+    $omnipotent_viewer = PhabricatorUser::getOmnipotentUser();
+
+    $repository = id(new PhabricatorRepositoryQuery())
+      ->setViewer($omnipotent_viewer)
+      ->withIdentifiers(array($identifier))
+      ->executeOne();
+    if (!$repository) {
+      return null;
+    }
+
     $lfs_pass = $password->openEnvelope();
     $lfs_hash = PhabricatorHash::weakDigest($lfs_pass);
 
     $token = id(new PhabricatorAuthTemporaryTokenQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->setViewer($omnipotent_viewer)
+      ->withTokenResources(array($repository->getPHID()))
       ->withTokenTypes(array(DiffusionGitLFSTemporaryTokenType::TOKENTYPE))
       ->withTokenCodes(array($lfs_hash))
       ->withExpired(false)
@@ -665,7 +735,7 @@ final class DiffusionServeController extends DiffusionController {
     }
 
     $user = id(new PhabricatorPeopleQuery())
-      ->setViewer(PhabricatorUser::getOmnipotentUser())
+      ->setViewer($omnipotent_viewer)
       ->withPHIDs(array($token->getUserPHID()))
       ->executeOne();
 
@@ -715,28 +785,17 @@ final class DiffusionServeController extends DiffusionController {
       return null;
     }
 
-    $password_entry = id(new PhabricatorRepositoryVCSPassword())
-      ->loadOneWhere('userPHID = %s', $user->getPHID());
-    if (!$password_entry) {
-      // User doesn't have a password set.
+    $request = $this->getRequest();
+    $content_source = PhabricatorContentSource::newFromRequest($request);
+
+    $engine = id(new PhabricatorAuthPasswordEngine())
+      ->setViewer($user)
+      ->setContentSource($content_source)
+      ->setPasswordType(PhabricatorAuthPassword::PASSWORD_TYPE_VCS)
+      ->setObject($user);
+
+    if (!$engine->isValidPassword($password)) {
       return null;
-    }
-
-    if (!$password_entry->comparePassword($password, $user)) {
-      // Password doesn't match.
-      return null;
-    }
-
-    // If the user's password is stored using a less-than-optimal hash, upgrade
-    // them to the strongest available hash.
-
-    $hash_envelope = new PhutilOpaqueEnvelope(
-      $password_entry->getPasswordHash());
-    if (PhabricatorPasswordHasher::canUpgradeHash($hash_envelope)) {
-      $password_entry->setPassword($password, $user);
-      $unguarded = AphrontWriteGuard::beginScopedUnguardedWrites();
-        $password_entry->save();
-      unset($unguarded);
     }
 
     return $user;
@@ -886,18 +945,26 @@ final class DiffusionServeController extends DiffusionController {
     // This is a pretty funky fix: it would be nice to more precisely detect
     // that a request is a `--depth N` clone request, but we don't have any code
     // to decode protocol frames yet. Instead, look for reasonable evidence
-    // in the error and output that we're looking at a `--depth` clone.
+    // in the output that we're looking at a `--depth` clone.
 
-    // For evidence this isn't completely crazy, see:
-    // https://github.com/schacon/grack/pull/7
+    // A valid x-git-upload-pack-result response during packfile negotiation
+    // should end with a flush packet ("0000"). As long as that packet
+    // terminates the response body in the response, we'll assume the response
+    // is correct and complete.
+
+    // See https://git-scm.com/docs/pack-protocol#_packfile_negotiation
 
     $stdout_regexp = '(^Content-Type: application/x-git-upload-pack-result)m';
-    $stderr_regexp = '(The remote end hung up unexpectedly)';
 
     $has_pack = preg_match($stdout_regexp, $stdout);
-    $is_hangup = preg_match($stderr_regexp, $stderr);
 
-    return $has_pack && $is_hangup;
+    if (strlen($stdout) >= 4) {
+      $has_flush_packet = (substr($stdout, -4) === "0000");
+    } else {
+      $has_flush_packet = false;
+    }
+
+    return ($has_pack && $has_flush_packet);
   }
 
   private function getCommonEnvironment(PhabricatorUser $viewer) {
@@ -1043,7 +1110,7 @@ final class DiffusionServeController extends DiffusionController {
           // <https://github.com/github/git-lfs/issues/1088>
           $no_authorization = 'Basic '.base64_encode('none');
 
-          $get_uri = $file->getCDNURI();
+          $get_uri = $file->getCDNURI('data');
           $actions['download'] = array(
             'href' => $get_uri,
             'header' => array(

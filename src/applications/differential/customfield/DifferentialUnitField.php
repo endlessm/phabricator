@@ -44,12 +44,12 @@ final class DifferentialUnitField
       ->executeOne();
     if ($buildable) {
       switch ($buildable->getBuildableStatus()) {
-        case HarbormasterBuildable::STATUS_BUILDING:
+        case HarbormasterBuildableStatus::STATUS_BUILDING:
           $warnings[] = pht(
             'These changes have not finished building yet and may have build '.
             'failures.');
           break;
-        case HarbormasterBuildable::STATUS_FAILED:
+        case HarbormasterBuildableStatus::STATUS_FAILED:
           $warnings[] = pht(
             'These changes have failed to build.');
           break;
@@ -72,29 +72,20 @@ final class DifferentialUnitField
   }
 
   public function renderDiffPropertyViewValue(DifferentialDiff $diff) {
+    $status_value = $diff->getUnitStatus();
+    $status = DifferentialUnitStatus::newStatusFromValue($status_value);
 
-    $colors = array(
-      DifferentialUnitStatus::UNIT_NONE => 'grey',
-      DifferentialUnitStatus::UNIT_OKAY => 'green',
-      DifferentialUnitStatus::UNIT_WARN => 'yellow',
-      DifferentialUnitStatus::UNIT_FAIL => 'red',
-      DifferentialUnitStatus::UNIT_SKIP => 'blue',
-      DifferentialUnitStatus::UNIT_AUTO_SKIP => 'blue',
-    );
-    $icon_color = idx($colors, $diff->getUnitStatus(), 'grey');
-
-    $message = DifferentialRevisionUpdateHistoryView::getDiffUnitMessage(
-      $diff->getUnitStatus());
+    $status_icon = $status->getIconIcon();
+    $status_color = $status->getIconColor();
+    $status_name = $status->getName();
 
     $status = id(new PHUIStatusListView())
       ->addItem(
         id(new PHUIStatusItemView())
-          ->setIcon(PHUIStatusItemView::ICON_STAR, $icon_color)
-          ->setTarget($message));
+          ->setIcon($status_icon, $status_color)
+          ->setTarget($status_name));
 
     return $status;
   }
-
-
 
 }

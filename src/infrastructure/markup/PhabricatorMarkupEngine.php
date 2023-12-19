@@ -42,9 +42,11 @@ final class PhabricatorMarkupEngine extends Phobject {
   private $objects = array();
   private $viewer;
   private $contextObject;
-  private $version = 17;
+  private $version = 21;
   private $engineCaches = array();
   private $auxiliaryConfig = array();
+
+  private static $engineStack = array();
 
 
 /* -(  Markup Pipeline  )---------------------------------------------------- */
@@ -103,6 +105,24 @@ final class PhabricatorMarkupEngine extends Phobject {
    * @task markup
    */
   public function process() {
+    self::$engineStack[] = $this;
+
+    try {
+      $result = $this->execute();
+    } finally {
+      array_pop(self::$engineStack);
+    }
+
+    return $result;
+  }
+
+  public static function isRenderingEmbeddedContent() {
+    // See T13678. This prevents cycles when rendering embedded content that
+    // itself has remarkup fields.
+    return (count(self::$engineStack) > 1);
+  }
+
+  private function execute() {
     $keys = array();
     foreach ($this->objects as $key => $info) {
       if (!isset($info['markup'])) {
@@ -504,12 +524,14 @@ final class PhabricatorMarkupEngine extends Phobject {
 
     $rules = array();
     $rules[] = new PhutilRemarkupEscapeRemarkupRule();
+    $rules[] = new PhutilRemarkupEvalRule();
     $rules[] = new PhutilRemarkupMonospaceRule();
 
 
     $rules[] = new PhutilRemarkupDocumentLinkRule();
     $rules[] = new PhabricatorNavigationRemarkupRule();
     $rules[] = new PhabricatorKeyboardRemarkupRule();
+    $rules[] = new PhabricatorConfigRemarkupRule();
 
     if ($options['youtube']) {
       $rules[] = new PhabricatorYoutubeRemarkupRule();
@@ -538,6 +560,7 @@ final class PhabricatorMarkupEngine extends Phobject {
     $rules[] = new PhutilRemarkupDelRule();
     $rules[] = new PhutilRemarkupUnderlineRule();
     $rules[] = new PhutilRemarkupHighlightRule();
+    $rules[] = new PhutilRemarkupAnchorRule();
 
     foreach (self::loadCustomInlineRules() as $rule) {
       $rules[] = clone $rule;
@@ -580,6 +603,14 @@ final class PhabricatorMarkupEngine extends Phobject {
     $engine->setConfig('viewer', $viewer);
 
     foreach ($content_blocks as $content_block) {
+      if ($content_block === null) {
+        continue;
+      }
+
+      if (!strlen($content_block)) {
+        continue;
+      }
+
       $engine->markupText($content_block);
       $phids = $engine->getTextMetadata(
         PhabricatorMentionRemarkupRule::KEY_MENTIONED,
@@ -601,7 +632,7 @@ final class PhabricatorMarkupEngine extends Phobject {
     foreach ($content_blocks as $content_block) {
       $engine->markupText($content_block);
       $phids = $engine->getTextMetadata(
-        PhabricatorEmbedFileRemarkupRule::KEY_EMBED_FILE_PHIDS,
+        PhabricatorEmbedFileRemarkupRule::KEY_ATTACH_INTENT_FILE_PHIDS,
         array());
       foreach ($phids as $phid) {
         $files[$phid] = $phid;

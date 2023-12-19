@@ -1,7 +1,11 @@
 <?php
 
-final class HarbormasterBuildArtifact extends HarbormasterDAO
-  implements PhabricatorPolicyInterface {
+final class HarbormasterBuildArtifact
+  extends HarbormasterDAO
+  implements
+    PhabricatorPolicyInterface,
+    PhabricatorDestructibleInterface,
+    PhabricatorConduitResultInterface {
 
   protected $buildTargetPHID;
   protected $artifactType;
@@ -15,6 +19,7 @@ final class HarbormasterBuildArtifact extends HarbormasterDAO
 
   public static function initializeNewBuildArtifact(
     HarbormasterBuildTarget $build_target) {
+
     return id(new HarbormasterBuildArtifact())
       ->attachBuildTarget($build_target)
       ->setBuildTargetPHID($build_target->getPHID());
@@ -43,13 +48,15 @@ final class HarbormasterBuildArtifact extends HarbormasterDAO
         'key_target' => array(
           'columns' => array('buildTargetPHID', 'artifactType'),
         ),
+        'key_index' => array(
+          'columns' => array('artifactIndex'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
 
-  public function generatePHID() {
-    return PhabricatorPHID::generateNewPHID(
-      HarbormasterBuildArtifactPHIDType::TYPECONST);
+  public function getPHIDType() {
+    return HarbormasterBuildArtifactPHIDType::TYPECONST;
   }
 
   public function attachBuildTarget(HarbormasterBuildTarget $build_target) {
@@ -141,7 +148,59 @@ final class HarbormasterBuildArtifact extends HarbormasterDAO
   }
 
   public function describeAutomaticCapability($capability) {
-    return pht('Users must be able to see a buildable to see its artifacts.');
+    return pht(
+      'Users must be able to see a build target to see its artifacts.');
   }
 
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+
+    $viewer = $this->getViewer();
+
+    $this->openTransaction();
+      $this->releaseArtifact($viewer);
+      $this->delete();
+    $this->saveTransaction();
+  }
+
+
+/* -(  PhabricatorConduitResultInterface  )---------------------------------- */
+
+  public function getFieldSpecificationsForConduit() {
+    return array(
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('buildTargetPHID')
+        ->setType('phid')
+        ->setDescription(pht('The build target this artifact is attached to.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('artifactType')
+        ->setType('string')
+        ->setDescription(pht('The artifact type.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('artifactKey')
+        ->setType('string')
+        ->setDescription(pht('The artifact key.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('isReleased')
+        ->setType('bool')
+        ->setDescription(pht('True if this artifact has been released.')),
+    );
+  }
+
+  public function getFieldValuesForConduit() {
+    return array(
+      'buildTargetPHID' => $this->getBuildTargetPHID(),
+      'artifactType' => $this->getArtifactType(),
+      'artifactKey' => $this->getArtifactKey(),
+      'isReleased' => (bool)$this->getIsReleased(),
+    );
+  }
+
+  public function getConduitSearchAttachments() {
+    return array();
+  }
 }

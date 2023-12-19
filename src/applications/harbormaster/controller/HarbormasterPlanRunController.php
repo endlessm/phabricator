@@ -9,15 +9,12 @@ final class HarbormasterPlanRunController extends HarbormasterPlanController {
     $plan = id(new HarbormasterBuildPlanQuery())
       ->setViewer($viewer)
       ->withIDs(array($plan_id))
-      ->requireCapabilities(
-        array(
-          PhabricatorPolicyCapability::CAN_VIEW,
-          PhabricatorPolicyCapability::CAN_EDIT,
-        ))
       ->executeOne();
     if (!$plan) {
       return new Aphront404Response();
     }
+
+    $plan->assertHasRunCapability($viewer);
 
     $cancel_uri = $this->getApplicationURI("plan/{$plan_id}/");
 
@@ -59,6 +56,12 @@ final class HarbormasterPlanRunController extends HarbormasterPlanController {
 
       if (!$errors) {
         $buildable->save();
+
+        $buildable->sendMessage(
+          $viewer,
+          HarbormasterMessageType::BUILDABLE_BUILD,
+          false);
+
         $buildable->applyPlan($plan, array(), $viewer->getPHID());
 
         $buildable_uri = '/B'.$buildable->getID();
@@ -81,7 +84,7 @@ final class HarbormasterPlanRunController extends HarbormasterPlanController {
           "example, `rX123456` or `D123`).\n\n".
           "For more detailed output, you can also run manual builds from ".
           "the command line:\n\n".
-          "  phabricator/ $ ./bin/harbormaster build <object> --plan %s",
+          "  $ ./bin/harbormaster build <object> --plan %s",
           $plan->getID()))
       ->appendChild(
         id(new AphrontFormTextControl())

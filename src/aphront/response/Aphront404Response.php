@@ -8,16 +8,26 @@ final class Aphront404Response extends AphrontHTMLResponse {
 
   public function buildResponseString() {
     $request = $this->getRequest();
-    $user = $request->getUser();
+    $viewer = $request->getViewer();
+
+    // See T13636. Note that this response may be served from a Site other than
+    // the primary PlatformSite. For now, always link to the PlatformSite.
+
+    // (This may not be the best possible place to send users who are currently
+    // on "real" sites, like the BlogSite.)
+    $return_uri = PhabricatorEnv::getURI('/');
 
     $dialog = id(new AphrontDialogView())
-      ->setUser($user)
+      ->setViewer($viewer)
       ->setTitle(pht('404 Not Found'))
-      ->addCancelButton('/', pht('Focus'))
+      ->addCancelButton($return_uri, pht('Return to Charted Waters'))
       ->appendParagraph(
         pht(
-          'Do not dwell in the past, do not dream of the future, '.
-          'concentrate the mind on the present moment.'));
+          'You arrive at your destination, but there is nothing here.'))
+      ->appendParagraph(
+        pht(
+          'Perhaps the real treasure was the friends you made '.
+          'along the way.'));
 
     $view = id(new PhabricatorStandardPageView())
       ->setTitle(pht('404 Not Found'))

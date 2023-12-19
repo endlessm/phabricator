@@ -49,10 +49,6 @@ final class DrydockResourceQuery extends DrydockQuery {
     return new DrydockResource();
   }
 
-  protected function loadPage() {
-    return $this->loadStandardPage($this->newResultObject());
-  }
-
   protected function willFilterPage(array $resources) {
     $blueprint_phids = mpull($resources, 'getBlueprintPHID');
 
@@ -100,46 +96,50 @@ final class DrydockResourceQuery extends DrydockQuery {
     if ($this->ids !== null) {
       $where[] = qsprintf(
         $conn,
-        'id IN (%Ld)',
+        'resource.id IN (%Ld)',
         $this->ids);
     }
 
     if ($this->phids !== null) {
       $where[] = qsprintf(
         $conn,
-        'phid IN (%Ls)',
+        'resource.phid IN (%Ls)',
         $this->phids);
     }
 
     if ($this->types !== null) {
       $where[] = qsprintf(
         $conn,
-        'type IN (%Ls)',
+        'resource.type IN (%Ls)',
         $this->types);
     }
 
     if ($this->statuses !== null) {
       $where[] = qsprintf(
         $conn,
-        'status IN (%Ls)',
+        'resource.status IN (%Ls)',
         $this->statuses);
     }
 
     if ($this->blueprintPHIDs !== null) {
       $where[] = qsprintf(
         $conn,
-        'blueprintPHID IN (%Ls)',
+        'resource.blueprintPHID IN (%Ls)',
         $this->blueprintPHIDs);
     }
 
     if ($this->datasourceQuery !== null) {
       $where[] = qsprintf(
         $conn,
-        'name LIKE %>',
+        'resource.name LIKE %>',
         $this->datasourceQuery);
     }
 
     return $where;
+  }
+
+  protected function getPrimaryTableAlias() {
+    return 'resource';
   }
 
 }

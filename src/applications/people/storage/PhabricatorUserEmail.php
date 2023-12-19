@@ -4,7 +4,11 @@
  * @task restrictions   Domain Restrictions
  * @task email          Email About Email
  */
-final class PhabricatorUserEmail extends PhabricatorUserDAO {
+final class PhabricatorUserEmail
+  extends PhabricatorUserDAO
+  implements
+    PhabricatorDestructibleInterface,
+    PhabricatorPolicyInterface {
 
   protected $userPHID;
   protected $address;
@@ -12,10 +16,13 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
   protected $isPrimary;
   protected $verificationCode;
 
+  private $user = self::ATTACHABLE;
+
   const MAX_ADDRESS_LENGTH = 128;
 
   protected function getConfiguration() {
     return array(
+      self::CONFIG_AUX_PHID => true,
       self::CONFIG_COLUMN_SCHEMA => array(
         'address' => 'sort128',
         'isVerified' => 'bool',
@@ -34,6 +41,10 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
     ) + parent::getConfiguration();
   }
 
+  public function getPHIDType() {
+    return PhabricatorPeopleUserEmailPHIDType::TYPECONST;
+  }
+
   public function getVerificationURI() {
     return '/emailverify/'.$this->getVerificationCode().'/';
   }
@@ -43,6 +54,15 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
       $this->setVerificationCode(Filesystem::readRandomCharacters(24));
     }
     return parent::save();
+  }
+
+  public function attachUser(PhabricatorUser $user) {
+    $this->user = $user;
+    return $this;
+  }
+
+  public function getUser() {
+    return $this->assertAttached($this->user);
   }
 
 
@@ -83,9 +103,8 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
    */
   public static function describeValidAddresses() {
     return pht(
-      "Email addresses should be in the form '%s'. The maximum ".
-      "length of an email address is %s character(s).",
-      'user@domain.com',
+      'Email addresses should be in the form "user@domain.com". The maximum '.
+      'length of an email address is %s characters.',
       new PhutilNumber(self::MAX_ADDRESS_LENGTH));
   }
 
@@ -176,7 +195,9 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
 
     $signature = null;
     if (!$is_serious) {
-      $signature = pht("Get Well Soon,\nPhabricator");
+      $signature = pht(
+        "Get Well Soon,\n%s",
+        PlatformSymbols::getPlatformServerName());
     }
 
     $body = sprintf(
@@ -192,7 +213,10 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
     id(new PhabricatorMetaMTAMail())
       ->addRawTos(array($address))
       ->setForceDelivery(true)
-      ->setSubject(pht('[Phabricator] Email Verification'))
+      ->setSubject(
+        pht(
+          '[%s] Email Verification',
+          PlatformSymbols::getPlatformServerName()))
       ->setBody($body)
       ->setRelatedPHID($user->getPHID())
       ->saveAndSend();
@@ -223,15 +247,18 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
       pht('Hi %s', $username),
       pht(
         'This email address (%s) is no longer your primary email address. '.
-        'Going forward, Phabricator will send all email to your new primary '.
-        'email address (%s).',
+        'Going forward, all email will be sent to your new primary email '.
+        'address (%s).',
         $old_address,
         $new_address));
 
     id(new PhabricatorMetaMTAMail())
       ->addRawTos(array($old_address))
       ->setForceDelivery(true)
-      ->setSubject(pht('[Phabricator] Primary Address Changed'))
+      ->setSubject(
+        pht(
+          '[%s] Primary Address Changed',
+          PlatformSymbols::getPlatformServerName()))
       ->setBody($body)
       ->setFrom($user->getPHID())
       ->setRelatedPHID($user->getPHID())
@@ -257,19 +284,55 @@ final class PhabricatorUserEmail extends PhabricatorUserDAO {
       pht('Hi %s', $username),
       pht(
         'This is now your primary email address (%s). Going forward, '.
-        'Phabricator will send all email here.',
+        'all email will be sent here.',
         $new_address));
 
     id(new PhabricatorMetaMTAMail())
       ->addRawTos(array($new_address))
       ->setForceDelivery(true)
-      ->setSubject(pht('[Phabricator] Primary Address Changed'))
+      ->setSubject(
+        pht(
+          '[%s] Primary Address Changed',
+          PlatformSymbols::getPlatformServerName()))
       ->setBody($body)
       ->setFrom($user->getPHID())
       ->setRelatedPHID($user->getPHID())
       ->saveAndSend();
 
     return $this;
+  }
+
+
+/* -(  PhabricatorDestructibleInterface  )----------------------------------- */
+
+
+  public function destroyObjectPermanently(
+    PhabricatorDestructionEngine $engine) {
+    $this->delete();
+  }
+
+
+/* -(  PhabricatorPolicyInterface  )----------------------------------------- */
+
+  public function getCapabilities() {
+    return array(
+      PhabricatorPolicyCapability::CAN_VIEW,
+      PhabricatorPolicyCapability::CAN_EDIT,
+    );
+  }
+
+  public function getPolicy($capability) {
+    $user = $this->getUser();
+
+    if ($this->getIsSystemAgent() || $this->getIsMailingList()) {
+      return PhabricatorPolicies::POLICY_ADMIN;
+    }
+
+    return $user->getPHID();
+  }
+
+  public function hasAutomaticCapability($capability, PhabricatorUser $viewer) {
+    return false;
   }
 
 }

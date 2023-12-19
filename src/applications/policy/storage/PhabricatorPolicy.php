@@ -85,8 +85,10 @@ final class PhabricatorPolicy
     $phid_type = phid_get_type($policy_identifier);
     switch ($phid_type) {
       case PhabricatorProjectProjectPHIDType::TYPECONST:
-        $policy->setType(PhabricatorPolicyType::TYPE_PROJECT);
-        $policy->setName($handle->getName());
+        $policy
+          ->setType(PhabricatorPolicyType::TYPE_PROJECT)
+          ->setName($handle->getName())
+          ->setIcon($handle->getIcon());
         break;
       case PhabricatorPeopleUserPHIDType::TYPECONST:
         $policy->setType(PhabricatorPolicyType::TYPE_USER);
@@ -218,6 +220,25 @@ final class PhabricatorPolicy
     PhabricatorUser $viewer,
     $policy) {
 
+    $type = phid_get_type($policy);
+    if ($type === PhabricatorProjectProjectPHIDType::TYPECONST) {
+      $handle = id(new PhabricatorHandleQuery())
+        ->setViewer($viewer)
+        ->withPHIDs(array($policy))
+        ->executeOne();
+
+      return pht(
+        'Members of the project "%s" can take this action.',
+        $handle->getFullName());
+    }
+
+    return self::getOpaquePolicyExplanation($viewer, $policy);
+  }
+
+  public static function getOpaquePolicyExplanation(
+    PhabricatorUser $viewer,
+    $policy) {
+
     $rule = PhabricatorPolicyQuery::getObjectPolicyRule($policy);
     if ($rule) {
       return $rule->getPolicyExplanation();
@@ -227,7 +248,7 @@ final class PhabricatorPolicy
       case PhabricatorPolicies::POLICY_PUBLIC:
         return pht(
           'This object is public and can be viewed by anyone, even if they '.
-          'do not have a Phabricator account.');
+          'do not have an account on this server.');
       case PhabricatorPolicies::POLICY_USER:
         return pht('Logged in users can take this action.');
       case PhabricatorPolicies::POLICY_ADMIN:
@@ -243,8 +264,9 @@ final class PhabricatorPolicy
         $type = phid_get_type($policy);
         if ($type == PhabricatorProjectProjectPHIDType::TYPECONST) {
           return pht(
-            'Members of the project "%s" can take this action.',
-            $handle->getFullName());
+            'Members of a particular project can take this action. (You '.
+            'can not see this object, so the name of this project is '.
+            'restricted.)');
         } else if ($type == PhabricatorPeopleUserPHIDType::TYPECONST) {
           return pht(
             '%s can take this action.',
@@ -274,45 +296,22 @@ final class PhabricatorPolicy
     }
   }
 
-  public function renderDescription($icon = false) {
-    $img = null;
-    if ($icon) {
-      $img = id(new PHUIIconView())
-        ->setIcon($this->getIcon());
-    }
+  public function newRef(PhabricatorUser $viewer) {
+    return id(new PhabricatorPolicyRef())
+      ->setViewer($viewer)
+      ->setPolicy($this);
+  }
 
-    if ($this->getHref()) {
-      $desc = javelin_tag(
-        'a',
-        array(
-          'href' => $this->getHref(),
-          'class' => 'policy-link',
-          'sigil' => $this->getWorkflow() ? 'workflow' : null,
-        ),
-        array(
-          $img,
-          $this->getName(),
-        ));
-    } else {
-      if ($img) {
-        $desc = array($img, $this->getName());
-      } else {
-        $desc = $this->getName();
-      }
-    }
+  public function isProjectPolicy() {
+    return ($this->getType() === PhabricatorPolicyType::TYPE_PROJECT);
+  }
 
-    switch ($this->getType()) {
-      case PhabricatorPolicyType::TYPE_PROJECT:
-        return pht('%s (Project)', $desc);
-      case PhabricatorPolicyType::TYPE_CUSTOM:
-        return $desc;
-      case PhabricatorPolicyType::TYPE_MASKED:
-        return pht(
-          '%s (You do not have permission to view policy details.)',
-          $desc);
-      default:
-        return $desc;
-    }
+  public function isCustomPolicy() {
+    return ($this->getType() === PhabricatorPolicyType::TYPE_CUSTOM);
+  }
+
+  public function isMaskedPolicy() {
+    return ($this->getType() === PhabricatorPolicyType::TYPE_MASKED);
   }
 
   /**
@@ -418,10 +417,21 @@ final class PhabricatorPolicy
       PhabricatorPolicies::POLICY_NOONE => 1,
     );
 
-    $this_strength = idx($strengths, $this->getPHID(), 0);
-    $other_strength = idx($strengths, $other->getPHID(), 0);
+    $this_strength = idx($strengths, $this_policy, 0);
+    $other_strength = idx($strengths, $other_policy, 0);
 
     return ($this_strength > $other_strength);
+  }
+
+  public function isStrongerThanOrEqualTo(PhabricatorPolicy $other) {
+    $this_policy = $this->getPHID();
+    $other_policy = $other->getPHID();
+
+    if ($this_policy === $other_policy) {
+      return true;
+    }
+
+    return $this->isStrongerThan($other);
   }
 
   public function isValidPolicyForEdit() {
@@ -434,11 +444,12 @@ final class PhabricatorPolicy
     $capability,
     $active_only) {
 
+    $exceptions = array();
     if ($object instanceof PhabricatorPolicyCodexInterface) {
-      $codex = PhabricatorPolicyCodex::newFromObject($object, $viewer);
+      $codex = id(PhabricatorPolicyCodex::newFromObject($object, $viewer))
+        ->setCapability($capability);
       $rules = $codex->getPolicySpecialRuleDescriptions();
 
-      $exceptions = array();
       foreach ($rules as $rule) {
         $is_active = $rule->getIsActive();
         if ($is_active) {
@@ -467,11 +478,13 @@ final class PhabricatorPolicy
 
         $exceptions[] = $description;
       }
-    } else if (method_exists($object, 'describeAutomaticCapability')) {
-      $exceptions = (array)$object->describeAutomaticCapability($capability);
-      $exceptions = array_filter($exceptions);
-    } else {
-      $exceptions = array();
+    }
+
+    if (!$exceptions) {
+      if (method_exists($object, 'describeAutomaticCapability')) {
+        $exceptions = (array)$object->describeAutomaticCapability($capability);
+        $exceptions = array_filter($exceptions);
+      }
     }
 
     return $exceptions;

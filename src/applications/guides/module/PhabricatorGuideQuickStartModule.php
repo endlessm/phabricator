@@ -103,33 +103,6 @@ final class PhabricatorGuideQuickStartModule extends PhabricatorGuideModule {
       ->setDescription($description);
     $guide_items->addItem($item);
 
-    $title = pht('Build a Dashboard');
-    $have_dashboard = (bool)PhabricatorDashboardInstall::getDashboard(
-      $viewer,
-      PhabricatorHomeApplication::DASHBOARD_DEFAULT,
-      'PhabricatorHomeApplication');
-    $href = PhabricatorEnv::getURI('/dashboard/');
-    if ($have_dashboard) {
-      $icon = 'fa-check';
-      $icon_bg = 'bg-green';
-      $description = pht(
-        "You've created at least one dashboard.");
-    } else {
-      $icon = 'fa-dashboard';
-      $icon_bg = 'bg-sky';
-      $description =
-        pht('Customize the default homepage layout and items.');
-    }
-
-    $item = id(new PhabricatorGuideItemView())
-      ->setTitle($title)
-      ->setHref($href)
-      ->setIcon($icon)
-      ->setIconBackground($icon_bg)
-      ->setDescription($description);
-    $guide_items->addItem($item);
-
-
     $title = pht('Personalize your Install');
     $wordmark = PhabricatorEnv::getEnvConfig('ui.logo');
     $href = PhabricatorEnv::getURI('/config/edit/ui.logo/');
@@ -159,7 +132,7 @@ final class PhabricatorGuideQuickStartModule extends PhabricatorGuideModule {
     $icon = 'fa-globe';
     $icon_bg = 'bg-sky';
     $description =
-      pht('See all the applications included in Phabricator.');
+      pht('See all available applications.');
 
     $item = id(new PhabricatorGuideItemView())
       ->setTitle($title)
@@ -186,7 +159,7 @@ final class PhabricatorGuideQuickStartModule extends PhabricatorGuideModule {
         $icon = 'fa-group';
         $icon_bg = 'bg-sky';
         $description =
-          pht('Invite the rest of your team to get started on Phabricator.');
+          pht('Invite the rest of your team to get started.');
       }
 
       $item = id(new PhabricatorGuideItemView())
@@ -199,14 +172,12 @@ final class PhabricatorGuideQuickStartModule extends PhabricatorGuideModule {
     }
 
     $intro = pht(
-      'If you\'re new to Phabricator, these optional steps can help you learn '.
-      'the basics. Conceptually, Phabricator is structured as a graph, and '.
-      'repositories, tasks, and projects are all independent from each other. '.
-      'Feel free to set up Phabricator for how you work best, and explore '.
-      'these features at your own pace.');
+      'If you\'re new to this software, these optional steps can help you '.
+      'learn the basics. Feel free to set things up for how you work best '.
+      'and explore these features at your own pace.');
 
     $intro = new PHUIRemarkupView($viewer, $intro);
-    $intro = id(new PHUIDocumentViewPro())
+    $intro = id(new PHUIDocumentView())
       ->appendChild($intro);
 
     return array($intro, $guide_items);

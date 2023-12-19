@@ -29,6 +29,7 @@ final class PhabricatorDatabaseRef
   private $connectionLatency;
   private $connectionStatus;
   private $connectionMessage;
+  private $connectionException;
 
   private $replicaStatus;
   private $replicaMessage;
@@ -220,6 +221,9 @@ final class PhabricatorDatabaseRef
     return $this->replicaRefs;
   }
 
+  public function getDisplayName() {
+    return $this->getRefKey();
+  }
 
   public function getRefKey() {
     $host = $this->getHost();
@@ -318,6 +322,7 @@ final class PhabricatorDatabaseRef
     $default_user = PhabricatorEnv::getEnvConfig('mysql.user');
 
     $default_pass = PhabricatorEnv::getEnvConfig('mysql.pass');
+    $default_pass = phutil_string_cast($default_pass);
     $default_pass = new PhutilOpaqueEnvelope($default_pass);
 
     $config = PhabricatorEnv::getEnvConfig('cluster.databases');
@@ -348,7 +353,7 @@ final class PhabricatorDatabaseRef
         $ref->setConnectionMessage(
           pht(
             'No permission to run "SHOW SLAVE STATUS". Grant this user '.
-            '"REPLICATION CLIENT" permission to allow Phabricator to '.
+            '"REPLICATION CLIENT" permission to allow this server to '.
             'monitor replica health.'));
       } catch (AphrontInvalidCredentialsQueryException $ex) {
         $ref->setConnectionStatus(self::STATUS_AUTH);
@@ -453,6 +458,7 @@ final class PhabricatorDatabaseRef
       return false;
     }
 
+    $this->connectionException = null;
     try {
       $connection->openConnection();
       $reachable = true;
@@ -463,6 +469,7 @@ final class PhabricatorDatabaseRef
       // yet.
       throw $ex;
     } catch (Exception $ex) {
+      $this->connectionException = $ex;
       $reachable = false;
     }
 
@@ -504,6 +511,10 @@ final class PhabricatorDatabaseRef
         $this->getHealthRecordCacheKey());
     }
     return $this->healthRecord;
+  }
+
+  public function getConnectionException() {
+    return $this->connectionException;
   }
 
   public static function getActiveDatabaseRefs() {
@@ -550,8 +561,14 @@ final class PhabricatorDatabaseRef
     $conn = $this->newManagementConnection();
 
     try {
-      $value = queryfx_one($conn, 'SELECT @@%Q', $key);
-      $value = $value['@@'.$key];
+      $value = queryfx_one($conn, 'SELECT @@%C', $key);
+
+      // NOTE: Although MySQL allows us to escape configuration values as if
+      // they are column names, the escaping is included in the column name
+      // of the return value: if we select "@@`x`", we get back a column named
+      // "@@`x`", not "@@x" as we might expect.
+      $value = head($value);
+
     } catch (AphrontQueryException $ex) {
       $value = null;
     }

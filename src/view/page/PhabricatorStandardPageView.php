@@ -22,6 +22,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
   private $tabs;
   private $crumbs;
   private $navigation;
+  private $footer;
 
   public function setShowFooter($show_footer) {
     $this->showFooter = $show_footer;
@@ -30,18 +31,6 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
 
   public function getShowFooter() {
     return $this->showFooter;
-  }
-
-  public function setApplicationMenu($application_menu) {
-    // NOTE: For now, this can either be a PHUIListView or a
-    // PHUIApplicationMenuView.
-
-    $this->applicationMenu = $application_menu;
-    return $this;
-  }
-
-  public function getApplicationMenu() {
-    return $this->applicationMenu;
   }
 
   public function setApplicationName($application_name) {
@@ -208,6 +197,22 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
 
 
   protected function willRenderPage() {
+    $footer = $this->renderFooter();
+
+    // NOTE: A cleaner solution would be to let body layout elements implement
+    // some kind of "LayoutInterface" so content can be embedded inside frames,
+    // but there's only really one use case for this for now.
+    $children = $this->renderChildren();
+    if ($children) {
+      $layout = head($children);
+      if ($layout instanceof PHUIFormationView) {
+        $layout->setFooter($footer);
+        $footer = null;
+      }
+    }
+
+    $this->footer = $footer;
+
     parent::willRenderPage();
 
     if (!$this->getRequest()) {
@@ -271,43 +276,15 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
               'doc_name' => pht('See Documentation'),
               'doc_href' => $doc_href,
               'message' => pht(
-                'Phabricator thinks you are using %s, but your '.
-                'client is conviced that it is using %s. This is a serious '.
+                'This server thinks you are using %s, but your '.
+                'client is convinced that it is using %s. This is a serious '.
                 'misconfiguration with subtle, but significant, consequences.',
                 $server_protocol, $client_protocol),
             ));
         }
       }
 
-      $icon = id(new PHUIIconView())
-        ->setIcon('fa-download')
-        ->addClass('phui-icon-circle-icon');
-      $lightbox_id = celerity_generate_unique_node_id();
-      $download_form = phabricator_form(
-        $user,
-        array(
-          'action' => '#',
-          'method' => 'POST',
-          'class'  => 'lightbox-download-form',
-          'sigil'  => 'download lightbox-download-submit',
-          'id'     => 'lightbox-download-form',
-        ),
-        phutil_tag(
-          'a',
-          array(
-            'class' => 'lightbox-download phui-icon-circle hover-green',
-            'href' => '#',
-          ),
-          array(
-            $icon,
-          )));
-
-      Javelin::initBehavior(
-        'lightbox-attachments',
-        array(
-          'lightbox_id'     => $lightbox_id,
-          'downloadForm'    => $download_form,
-        ));
+      Javelin::initBehavior('lightbox-attachments');
     }
 
     Javelin::initBehavior('aphront-form-disable-on-submit');
@@ -344,6 +321,12 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
         ));
     }
 
+    // If we aren't showing the page chrome, skip rendering DarkConsole and the
+    // main menu, since they won't be visible on the page.
+    if (!$this->getShowChrome()) {
+      return;
+    }
+
     if ($console) {
       require_celerity_resource('aphront-dark-console-css');
 
@@ -358,9 +341,6 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
       Javelin::initBehavior(
         'dark-console',
         $this->getConsoleConfig());
-
-      // Change this to initBehavior when there is some behavior to initialize
-      require_celerity_resource('javelin-behavior-error-log');
     }
 
     if ($user) {
@@ -376,7 +356,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
       $menu->setController($this->getController());
     }
 
-    $application_menu = $this->getApplicationMenu();
+    $application_menu = $this->applicationMenu;
     if ($application_menu) {
       if ($application_menu instanceof PHUIApplicationMenuView) {
         $crumbs = $this->getCrumbs();
@@ -389,6 +369,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
 
       $menu->setApplicationMenu($application_menu);
     }
+
 
     $this->menuContent = $menu->render();
   }
@@ -537,8 +518,6 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
 
     $body = parent::getBody();
 
-    $footer = $this->renderFooter();
-
     $nav = $this->getNavigation();
     $tabs = $this->getTabs();
     if ($nav) {
@@ -547,7 +526,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
         $nav->setCrumbs($crumbs);
       }
       $nav->appendChild($body);
-      $nav->appendFooter($footer);
+      $nav->appendFooter($this->footer);
       $content = phutil_implode_html('', array($nav->render()));
     } else {
       $content = array();
@@ -566,7 +545,7 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
       }
 
       $content[] = $body;
-      $content[] = $footer;
+      $content[] = $this->footer;
 
       $content = phutil_implode_html('', $content);
     }
@@ -608,12 +587,15 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
         Javelin::initBehavior(
           'aphlict-listen',
           array(
-            'websocketURI'  => (string)$client_uri,
+            'websocketURI' => (string)$client_uri,
           ) + $this->buildAphlictListenConfigData());
+
+        CelerityAPI::getStaticResourceResponse()
+          ->addContentSecurityPolicyURI('connect-src', $client_uri);
       }
     }
 
-    $tail[] = $response->renderHTMLFooter();
+    $tail[] = $response->renderHTMLFooter($this->getFrameable());
 
     return $tail;
   }
@@ -860,6 +842,19 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
       $blacklist[] = $application->getQuicksandURIPatternBlacklist();
     }
 
+    // See T4340. Currently, Phortune and Auth both require pulling in external
+    // Javascript (for Stripe card management and Recaptcha, respectively).
+    // This can put us in a position where the user loads a page with a
+    // restrictive Content-Security-Policy, then uses Quicksand to navigate to
+    // a page which needs to load external scripts. For now, just blacklist
+    // these entire applications since we aren't giving up anything
+    // significant by doing so.
+
+    $blacklist[] = array(
+      '/phortune/.*',
+      '/auth/.*',
+    );
+
     return array_mergev($blacklist);
   }
 
@@ -880,13 +875,6 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
   public function produceAphrontResponse() {
     $controller = $this->getController();
 
-    if (!$this->getApplicationMenu()) {
-      $application_menu = $controller->buildApplicationMenu();
-      if ($application_menu) {
-        $this->setApplicationMenu($application_menu);
-      }
-    }
-
     $viewer = $this->getUser();
     if ($viewer && $viewer->getPHID()) {
       $object_phids = $this->pageObjects;
@@ -902,7 +890,19 @@ final class PhabricatorStandardPageView extends PhabricatorBarePageView
       $response = id(new AphrontAjaxResponse())
         ->setContent($content);
     } else {
+      // See T13247. Try to find some navigational menu items to create a
+      // mobile navigation menu from.
+      $application_menu = $controller->buildApplicationMenu();
+      if (!$application_menu) {
+        $navigation = $this->getNavigation();
+        if ($navigation) {
+          $application_menu = $navigation->getMenu();
+        }
+      }
+      $this->applicationMenu = $application_menu;
+
       $content = $this->render();
+
       $response = id(new AphrontWebpageResponse())
         ->setContent($content)
         ->setFrameable($this->getFrameable());

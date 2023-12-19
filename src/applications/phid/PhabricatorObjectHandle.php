@@ -31,10 +31,8 @@ final class PhabricatorObjectHandle
   private $subtitle;
   private $tokenIcon;
   private $commandLineObjectName;
-
-  private $stateIcon;
-  private $stateColor;
-  private $stateName;
+  private $mailStampName;
+  private $capabilities = array();
 
   public function setIcon($icon) {
     $this->icon = $icon;
@@ -134,6 +132,15 @@ final class PhabricatorObjectHandle
     return $this->objectName;
   }
 
+  public function setMailStampName($mail_stamp_name) {
+    $this->mailStampName = $mail_stamp_name;
+    return $this;
+  }
+
+  public function getMailStampName() {
+    return $this->mailStampName;
+  }
+
   public function setURI($uri) {
     $this->uri = $uri;
     return $this;
@@ -188,6 +195,10 @@ final class PhabricatorObjectHandle
 
   public function getStatus() {
     return $this->status;
+  }
+
+  public function isClosed() {
+    return ($this->status === self::STATUS_CLOSED);
   }
 
   public function setFullName($full_name) {
@@ -289,66 +300,25 @@ final class PhabricatorObjectHandle
     return $this->complete;
   }
 
-  public function setStateIcon($state_icon) {
-    $this->stateIcon = $state_icon;
-    return $this;
-  }
-
-  public function getStateIcon() {
-    return $this->stateIcon;
-  }
-
-  public function setStateColor($state_color) {
-    $this->stateColor = $state_color;
-    return $this;
-  }
-
-  public function getStateColor() {
-    return $this->stateColor;
-  }
-
-  public function setStateName($state_name) {
-    $this->stateName = $state_name;
-    return $this;
-  }
-
-  public function getStateName() {
-    return $this->stateName;
-  }
-
-  public function renderStateIcon() {
-    $icon = $this->getStateIcon();
-    if ($icon === null) {
-      $icon = 'fa-question-circle-o';
-    }
-
-    $color = $this->getStateColor();
-
-    $name = $this->getStateName();
-    if ($name === null) {
-      $name = pht('Unknown');
-    }
-
-    return id(new PHUIIconView())
-      ->setIcon($icon, $color)
-      ->addSigil('has-tooltip')
-      ->setMetadata(
-        array(
-          'tip' => $name,
-        ));
-  }
-
   public function renderLink($name = null) {
     return $this->renderLinkWithAttributes($name, array());
   }
 
-  public function renderHovercardLink($name = null) {
+  public function renderHovercardLink($name = null, $context_phid = null) {
     Javelin::initBehavior('phui-hovercards');
+
+    $hovercard_spec = array(
+      'objectPHID' => $this->getPHID(),
+    );
+
+    if ($context_phid) {
+      $hovercard_spec['contextPHID'] = $context_phid;
+    }
 
     $attributes = array(
       'sigil' => 'hovercard',
       'meta' => array(
-        'hoverPHID' => $this->getPHID(),
+        'hovercardSpec' => $hovercard_spec,
       ),
     );
 
@@ -429,6 +399,72 @@ final class PhabricatorObjectHandle
   protected function getPHIDType() {
     $types = PhabricatorPHIDType::getAllTypes();
     return idx($types, $this->getType());
+  }
+
+  public function hasCapabilities() {
+    if (!$this->isComplete()) {
+      return false;
+    }
+
+    return ($this->getType() === PhabricatorPeopleUserPHIDType::TYPECONST);
+  }
+
+  public function attachCapability(
+    PhabricatorPolicyInterface $object,
+    $capability,
+    $has_capability) {
+
+    if (!$this->hasCapabilities()) {
+      throw new Exception(
+        pht(
+          'Attempting to attach capability ("%s") for object ("%s") to '.
+          'handle, but this handle (of type "%s") can not have '.
+          'capabilities.',
+          $capability,
+          get_class($object),
+          $this->getType()));
+    }
+
+    $object_key = $this->getObjectCapabilityKey($object);
+    $this->capabilities[$object_key][$capability] = $has_capability;
+
+    return $this;
+  }
+
+  public function hasViewCapability(PhabricatorPolicyInterface $object) {
+    return $this->hasCapability($object, PhabricatorPolicyCapability::CAN_VIEW);
+  }
+
+  private function hasCapability(
+    PhabricatorPolicyInterface $object,
+    $capability) {
+
+    $object_key = $this->getObjectCapabilityKey($object);
+
+    if (!isset($this->capabilities[$object_key][$capability])) {
+      throw new Exception(
+        pht(
+          'Attempting to test capability "%s" for handle of type "%s", but '.
+          'this capability has not been attached.',
+          $capability,
+          $this->getType()));
+    }
+
+    return $this->capabilities[$object_key][$capability];
+  }
+
+  private function getObjectCapabilityKey(PhabricatorPolicyInterface $object) {
+    $object_phid = $object->getPHID();
+
+    if (!$object_phid) {
+      throw new Exception(
+        pht(
+          'Object (of class "%s") has no PHID, so handles can not interact '.
+          'with capabilities for it.',
+          get_class($object)));
+    }
+
+    return $object_phid;
   }
 
 

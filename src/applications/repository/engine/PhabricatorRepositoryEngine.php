@@ -56,137 +56,19 @@ abstract class PhabricatorRepositoryEngine extends Phobject {
     $lock_key,
     $lock_device_only) {
 
-    $lock_parts = array();
-    $lock_parts[] = $lock_key;
-    $lock_parts[] = $repository->getID();
+    $lock_parts = array(
+      'repositoryPHID' => $repository->getPHID(),
+    );
 
     if ($lock_device_only) {
       $device = AlmanacKeys::getLiveDevice();
       if ($device) {
-        $lock_parts[] = $device->getID();
+        $lock_parts['devicePHID'] = $device->getPHID();
       }
     }
 
-    $lock_name = implode(':', $lock_parts);
-    return PhabricatorGlobalLock::newLock($lock_name);
+    return PhabricatorGlobalLock::newLock($lock_key, $lock_parts);
   }
-
-
-  /**
-   * Verify that the "origin" remote exists, and points at the correct URI.
-   *
-   * This catches or corrects some types of misconfiguration, and also repairs
-   * an issue where Git 1.7.1 does not create an "origin" for `--bare` clones.
-   * See T4041.
-   *
-   * @param   PhabricatorRepository Repository to verify.
-   * @return  void
-   */
-  protected function verifyGitOrigin(PhabricatorRepository $repository) {
-    try {
-      list($remotes) = $repository->execxLocalCommand(
-        'remote show -n origin');
-    } catch (CommandException $ex) {
-      throw new PhutilProxyException(
-        pht(
-          'Expected to find a Git working copy at path "%s", but the '.
-          'path exists and is not a valid working copy. If you remove '.
-          'this directory, the daemons will automatically recreate it '.
-          'correctly. Phabricator will not destroy the directory for you '.
-          'because it can not be sure that it does not contain important '.
-          'data.',
-          $repository->getLocalPath()),
-        $ex);
-    }
-
-    $matches = null;
-    if (!preg_match('/^\s*Fetch URL:\s*(.*?)\s*$/m', $remotes, $matches)) {
-      throw new Exception(
-        pht(
-          "Expected '%s' in '%s'.",
-          'Fetch URL',
-          'git remote show -n origin'));
-    }
-
-    $remote_uri = $matches[1];
-    $expect_remote = $repository->getRemoteURI();
-
-    if ($remote_uri == 'origin') {
-      // If a remote does not exist, git pretends it does and prints out a
-      // made up remote where the URI is the same as the remote name. This is
-      // definitely not correct.
-
-      // Possibly, we should use `git remote --verbose` instead, which does not
-      // suffer from this problem (but is a little more complicated to parse).
-      $valid = false;
-      $exists = false;
-    } else {
-      $normal_type_git = PhabricatorRepositoryURINormalizer::TYPE_GIT;
-
-      $remote_normal = id(new PhabricatorRepositoryURINormalizer(
-        $normal_type_git,
-        $remote_uri))->getNormalizedPath();
-
-      $expect_normal = id(new PhabricatorRepositoryURINormalizer(
-        $normal_type_git,
-        $expect_remote))->getNormalizedPath();
-
-      $valid = ($remote_normal == $expect_normal);
-      $exists = true;
-    }
-
-    // These URIs may have plaintext HTTP credentials. If they do, censor
-    // them for display. See T12945.
-    $display_remote = phutil_censor_credentials($remote_uri);
-    $display_expect = phutil_censor_credentials($expect_remote);
-
-    if (!$valid) {
-      if (!$exists) {
-        // If there's no "origin" remote, just create it regardless of how
-        // strongly we own the working copy. There is almost no conceivable
-        // scenario in which this could do damage.
-        $this->log(
-          pht(
-            'Remote "origin" does not exist. Creating "origin", with '.
-            'URI "%s".',
-            $expect_remote));
-        $repository->execxLocalCommand(
-          'remote add origin %P',
-          $repository->getRemoteURIEnvelope());
-
-        // NOTE: This doesn't fetch the origin (it just creates it), so we won't
-        // know about origin branches until the next "pull" happens. That's fine
-        // for our purposes, but might impact things in the future.
-      } else {
-        if ($repository->canDestroyWorkingCopy()) {
-          // Bad remote, but we can try to repair it.
-          $this->log(
-            pht(
-              'Remote "origin" exists, but is pointed at the wrong URI, "%s". '.
-              'Resetting origin URI to "%s.',
-              $remote_uri,
-              $expect_remote));
-          $repository->execxLocalCommand(
-            'remote set-url origin %P',
-            $repository->getRemoteURIEnvelope());
-        } else {
-          // Bad remote and we aren't comfortable repairing it.
-          $message = pht(
-            'Working copy at "%s" has a mismatched origin URI, "%s". '.
-            'The expected origin URI is "%s". Fix your configuration, or '.
-            'set the remote URI correctly. To avoid breaking anything, '.
-            'Phabricator will not automatically fix this.',
-            $repository->getLocalPath(),
-            $display_remote,
-            $display_expect);
-          throw new Exception($message);
-        }
-      }
-    }
-  }
-
-
-
 
   /**
    * @task internal
@@ -200,5 +82,115 @@ abstract class PhabricatorRepositoryEngine extends Phobject {
     }
     return $this;
   }
+
+  final protected function queueCommitImportTask(
+    PhabricatorRepository $repository,
+    $commit_phid,
+    $task_priority,
+    $via) {
+
+    $vcs = $repository->getVersionControlSystem();
+    switch ($vcs) {
+      case PhabricatorRepositoryType::REPOSITORY_TYPE_GIT:
+        $class = 'PhabricatorRepositoryGitCommitMessageParserWorker';
+        break;
+      case PhabricatorRepositoryType::REPOSITORY_TYPE_SVN:
+        $class = 'PhabricatorRepositorySvnCommitMessageParserWorker';
+        break;
+      case PhabricatorRepositoryType::REPOSITORY_TYPE_MERCURIAL:
+        $class = 'PhabricatorRepositoryMercurialCommitMessageParserWorker';
+        break;
+      default:
+        throw new Exception(
+          pht(
+            'Unknown repository type "%s"!',
+            $vcs));
+    }
+
+    $data = array(
+      'commitPHID' => $commit_phid,
+    );
+
+    if ($via !== null) {
+      $data['via'] = $via;
+    }
+
+    $options = array(
+      'priority' => $task_priority,
+      'objectPHID' => $commit_phid,
+      'containerPHID' => $repository->getPHID(),
+    );
+
+    PhabricatorWorker::scheduleTask($class, $data, $options);
+  }
+
+  final protected function getImportTaskPriority(
+    PhabricatorRepository $repository,
+    array $refs) {
+    assert_instances_of($refs, 'PhabricatorRepositoryCommitRef');
+
+    // If the repository is importing for the first time, we schedule tasks
+    // at IMPORT priority, which is very low. Making progress on importing a
+    // new repository for the first time is less important than any other
+    // daemon task.
+
+    // If the repository has finished importing and we're just catching up
+    // on recent commits, we usually schedule discovery at COMMIT priority,
+    // which is slightly below the default priority.
+
+    // Note that followup tasks and triggered tasks (like those generated by
+    // Herald or Harbormaster) will queue at DEFAULT priority, so that each
+    // commit tends to fully import before we start the next one. This tends
+    // to give imports fairly predictable progress. See T11677 for some
+    // discussion.
+
+    if ($repository->isImporting()) {
+      $this->log(
+        pht(
+          'Importing %s commit(s) at low priority ("PRIORITY_IMPORT") '.
+          'because this repository is still importing.',
+          phutil_count($refs)));
+
+      return PhabricatorWorker::PRIORITY_IMPORT;
+    }
+
+    // See T13369. If we've discovered a lot of commits at once, import them
+    // at lower priority.
+
+    // This is mostly aimed at reducing the impact that synchronizing thousands
+    // of commits from a remote upstream has on other repositories. The queue
+    // is "mostly FIFO", so queueing a thousand commit imports can stall other
+    // repositories.
+
+    // In a perfect world we'd probably give repositories round-robin queue
+    // priority, but we don't currently have the primitives for this and there
+    // isn't a strong case for building them.
+
+    // Use "a whole lot of commits showed up at once" as a heuristic for
+    // detecting "someone synchronized an upstream", and import them at a lower
+    // priority to more closely approximate fair scheduling.
+
+    if (count($refs) >= PhabricatorRepository::LOWPRI_THRESHOLD) {
+      $this->log(
+        pht(
+          'Importing %s commit(s) at low priority ("PRIORITY_IMPORT") '.
+          'because many commits were discovered at once.',
+          phutil_count($refs)));
+
+      return PhabricatorWorker::PRIORITY_IMPORT;
+    }
+
+    // Otherwise, import at normal priority.
+
+    if ($refs) {
+      $this->log(
+        pht(
+          'Importing %s commit(s) at normal priority ("PRIORITY_COMMIT").',
+          phutil_count($refs)));
+    }
+
+    return PhabricatorWorker::PRIORITY_COMMIT;
+  }
+
 
 }

@@ -16,7 +16,7 @@ final class PhabricatorRepositoryMirrorEngine
 
     if (PhabricatorEnv::getEnvConfig('phabricator.silent')) {
       $this->log(
-        pht('Phabricator is running in silent mode; declining to mirror.'));
+        pht('This software is running in silent mode; declining to mirror.'));
       return;
     }
 
@@ -75,6 +75,20 @@ final class PhabricatorRepositoryMirrorEngine
   private function pushToGitRepository(
     PhabricatorRepository $repository,
     PhabricatorRepositoryURI $mirror_uri) {
+
+    // See T5965. Test if we have any refs to mirror. If we have nothing, git
+    // will exit with an error ("No refs in common and none specified; ...")
+    // when we run "git push --mirror".
+
+    // If we don't have any refs, we just bail out. (This is arguably sort of
+    // the wrong behavior: to mirror an empty repository faithfully we should
+    // delete everything in the remote.)
+
+    list($stdout) = $repository->execxLocalCommand(
+      'for-each-ref --count 1 --');
+    if (!strlen($stdout)) {
+      return;
+    }
 
     $argv = array(
       'push --verbose --mirror -- %P',

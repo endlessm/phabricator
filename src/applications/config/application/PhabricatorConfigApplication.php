@@ -15,7 +15,7 @@ final class PhabricatorConfigApplication extends PhabricatorApplication {
   }
 
   public function getTitleGlyph() {
-    return "\xE2\x98\xBA";
+    return "\xE2\x9C\xA8";
   }
 
   public function getApplicationGroup() {
@@ -31,19 +31,14 @@ final class PhabricatorConfigApplication extends PhabricatorApplication {
   }
 
   public function getShortDescription() {
-    return pht('Configure Phabricator');
+    return pht('Configure %s', PlatformSymbols::getPlatformServerName());
   }
 
   public function getRoutes() {
     return array(
       '/config/' => array(
-        '' => 'PhabricatorConfigListController',
-        'application/' => 'PhabricatorConfigApplicationController',
-        'all/' => 'PhabricatorConfigAllController',
-        'history/' => 'PhabricatorConfigHistoryController',
+        '' => 'PhabricatorConfigConsoleController',
         'edit/(?P<key>[\w\.\-]+)/' => 'PhabricatorConfigEditController',
-        'group/(?P<key>[^/]+)/' => 'PhabricatorConfigGroupController',
-        'version/' => 'PhabricatorConfigVersionController',
         'database/'.
           '(?:(?P<ref>[^/]+)/'.
           '(?:(?P<database>[^/]+)/'.
@@ -63,13 +58,19 @@ final class PhabricatorConfigApplication extends PhabricatorApplication {
           'purge/' => 'PhabricatorConfigPurgeCacheController',
         ),
         'module/' => array(
-          '(?P<module>[^/]+)/' => 'PhabricatorConfigModuleController',
+          '(?:(?P<module>[^/]+)/)?' => 'PhabricatorConfigModuleController',
         ),
         'cluster/' => array(
           'databases/' => 'PhabricatorConfigClusterDatabasesController',
           'notifications/' => 'PhabricatorConfigClusterNotificationsController',
           'repositories/' => 'PhabricatorConfigClusterRepositoriesController',
           'search/' => 'PhabricatorConfigClusterSearchController',
+        ),
+        'settings/' => array(
+          '' => 'PhabricatorConfigSettingsListController',
+          '(?P<filter>advanced|all)/'
+            => 'PhabricatorConfigSettingsListController',
+          'history/' => 'PhabricatorConfigSettingsHistoryController',
         ),
       ),
     );

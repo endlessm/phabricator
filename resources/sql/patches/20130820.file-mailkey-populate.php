@@ -1,6 +1,6 @@
 <?php
 
-echo pht('Populating Phabricator files with mail keys xactions...')."\n";
+echo pht('Populating files with mail keys...')."\n";
 
 $table = new PhabricatorFile();
 $table_name = $table->getTableName();
@@ -22,12 +22,12 @@ foreach (new LiskRawMigrationIterator($conn_w, 'file') as $row) {
 }
 
 if ($sql) {
-  foreach (PhabricatorLiskDAO::chunkSQL($sql, ', ') as $chunk) {
+  foreach (PhabricatorLiskDAO::chunkSQL($sql) as $chunk) {
     queryfx(
       $conn_w,
       'INSERT INTO %T
         (id, mailKey, phid, byteSize, storageEngine, storageFormat,
-          storageHandle, dateCreated, dateModified, metadata) VALUES %Q '.
+          storageHandle, dateCreated, dateModified, metadata) VALUES %LQ '.
       'ON DUPLICATE KEY UPDATE mailKey = VALUES(mailKey)',
       $table_name,
       $chunk);

@@ -6,12 +6,15 @@ final class DifferentialRevisionResignTransaction
   const TRANSACTIONTYPE = 'differential.revision.resign';
   const ACTIONKEY = 'resign';
 
-  protected function getRevisionActionLabel() {
+  protected function getRevisionActionLabel(
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('Resign as Reviewer');
   }
 
   protected function getRevisionActionDescription(
-    DifferentialRevision $revision) {
+    DifferentialRevision $revision,
+    PhabricatorUser $viewer) {
     return pht('You will resign as a reviewer for this change.');
   }
 
@@ -64,11 +67,6 @@ final class DifferentialRevisionResignTransaction
           'been closed. You can only resign from open revisions.'));
     }
 
-    if ($object->isDraft()) {
-      throw new Exception(
-        pht('You can not resign from a draft revision.'));
-    }
-
     $resigned = DifferentialReviewerStatus::STATUS_RESIGNED;
     if ($this->getViewerReviewerStatus($object, $viewer) == $resigned) {
       throw new Exception(
@@ -96,6 +94,14 @@ final class DifferentialRevisionResignTransaction
       '%s resigned from %s.',
       $this->renderAuthor(),
       $this->renderObject());
+  }
+
+  public function getTransactionTypeForConduit($xaction) {
+    return 'resign';
+  }
+
+  public function getFieldValuesForConduit($object, $data) {
+    return array();
   }
 
 }

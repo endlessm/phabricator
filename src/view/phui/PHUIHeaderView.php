@@ -166,7 +166,7 @@ final class PHUIHeaderView extends AphrontTagView {
     $classes[] = 'phui-header-shell';
 
     if ($this->noBackground) {
-      $classes[] = 'phui-header-no-backgound';
+      $classes[] = 'phui-header-no-background';
     }
 
     if ($this->bleedHeader) {
@@ -307,9 +307,14 @@ final class PHUIHeaderView extends AphrontTagView {
 
     $icon = null;
     if ($this->headerIcon) {
-      $icon = id(new PHUIIconView())
-        ->setIcon($this->headerIcon)
-        ->addClass('phui-header-icon');
+      if ($this->headerIcon instanceof PHUIIconView) {
+        $icon = id(clone $this->headerIcon)
+          ->addClass('phui-header-icon');
+      } else {
+        $icon = id(new PHUIIconView())
+          ->setIcon($this->headerIcon)
+          ->addClass('phui-header-icon');
+      }
     }
 
     $header_content = $this->header;
@@ -463,36 +468,6 @@ final class PHUIHeaderView extends AphrontTagView {
     $container_classes = array();
     $container_classes[] = 'policy-header-callout';
     $phid = $object->getPHID();
-
-    // If we're going to show the object policy, try to determine if the object
-    // policy differs from the default policy. If it does, we'll call it out
-    // as changed.
-    if (!$use_space_policy) {
-      $default_policy = PhabricatorPolicyQuery::getDefaultPolicyForObject(
-        $viewer,
-        $object,
-        $view_capability);
-      if ($default_policy) {
-        if ($default_policy->getPHID() != $policy->getPHID()) {
-          $container_classes[] = 'policy-adjusted';
-          if ($default_policy->isStrongerThan($policy)) {
-            // The policy has strictly been weakened. For example, the
-            // default might be "All Users" and the current policy is "Public".
-            $container_classes[] = 'policy-adjusted-weaker';
-          } else if ($policy->isStrongerThan($default_policy)) {
-            // The policy has strictly been strengthened, and is now more
-            // restrictive than the default. For example, "All Users" has
-            // been replaced with "No One".
-            $container_classes[] = 'policy-adjusted-stronger';
-          } else {
-            // The policy has been adjusted but not strictly strengthened
-            // or weakened. For example, "Members of X" has been replaced with
-            // "Members of Y".
-            $container_classes[] = 'policy-adjusted-different';
-          }
-        }
-      }
-    }
 
     $policy_name = array($policy->getShortName());
     $policy_icon = $policy->getIcon().' bluegrey';

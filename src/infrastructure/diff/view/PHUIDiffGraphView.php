@@ -4,6 +4,7 @@ final class PHUIDiffGraphView extends Phobject {
 
   private $isHead = true;
   private $isTail = true;
+  private $height;
 
   public function setIsHead($is_head) {
     $this->isHead = $is_head;
@@ -21,6 +22,15 @@ final class PHUIDiffGraphView extends Phobject {
 
   public function getIsTail() {
     return $this->isTail;
+  }
+
+  public function setHeight($height) {
+    $this->height = $height;
+    return $this;
+  }
+
+  public function getHeight() {
+    return $this->height;
   }
 
   public function renderRawGraph(array $parents) {
@@ -160,7 +170,7 @@ final class PHUIDiffGraphView extends Phobject {
 
             $terminated[$ii] = true;
 
-            // If this thread is joinining some other node here, we don't want
+            // If this thread is joining some other node here, we don't want
             // to terminate it.
             if (isset($graph[$key + 1])) {
               $joins = $graph[$key + 1]['join'];
@@ -205,6 +215,7 @@ final class PHUIDiffGraphView extends Phobject {
       'diffusion-commit-graph',
       array(
         'count' => $count,
+        'height' => $this->getHeight(),
       ));
 
     return $graph;

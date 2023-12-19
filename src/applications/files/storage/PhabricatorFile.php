@@ -40,6 +40,8 @@ final class PhabricatorFile extends PhabricatorFileDAO
   const METADATA_PROFILE = 'profile';
   const METADATA_STORAGE = 'storage';
   const METADATA_INTEGRITY = 'integrity';
+  const METADATA_CHUNK = 'chunk';
+  const METADATA_ALT_TEXT = 'alt';
 
   const STATUS_ACTIVE = 'active';
   const STATUS_DELETED = 'deleted';
@@ -134,6 +136,9 @@ final class PhabricatorFile extends PhabricatorFileDAO
           'columns' => array('builtinKey'),
           'unique' => true,
         ),
+        'key_engine' => array(
+          'columns' => array('storageEngine', 'storageHandle(64)'),
+        ),
       ),
     ) + parent::getConfiguration();
   }
@@ -155,8 +160,20 @@ final class PhabricatorFile extends PhabricatorFileDAO
 
   public function saveAndIndex() {
     $this->save();
-    PhabricatorSearchWorker::queueDocumentForIndexing($this->getPHID());
+
+    if ($this->isIndexableFile()) {
+      PhabricatorSearchWorker::queueDocumentForIndexing($this->getPHID());
+    }
+
     return $this;
+  }
+
+  private function isIndexableFile() {
+    if ($this->getIsChunk()) {
+      return false;
+    }
+
+    return true;
   }
 
   public function getMonogram() {
@@ -178,9 +195,17 @@ final class PhabricatorFile extends PhabricatorFileDAO
     }
 
     $tmp_name = idx($spec, 'tmp_name');
-    $is_valid = @is_uploaded_file($tmp_name);
-    if (!$is_valid) {
-      throw new Exception(pht('File is not an uploaded file.'));
+
+    // NOTE: If we parsed the request body ourselves, the files we wrote will
+    // not be registered in the `is_uploaded_file()` list. It's fine to skip
+    // this check: it just protects against sloppy code from the long ago era
+    // of "register_globals".
+
+    if (ini_get('enable_post_data_reading')) {
+      $is_valid = @is_uploaded_file($tmp_name);
+      if (!$is_valid) {
+        throw new Exception(pht('File is not an uploaded file.'));
+      }
     }
 
     $file_data = Filesystem::readFile($tmp_name);
@@ -260,8 +285,12 @@ final class PhabricatorFile extends PhabricatorFileDAO
     $file->setByteSize($length);
 
     // NOTE: Once we receive the first chunk, we'll detect its MIME type and
-    // update the parent file. This matters for large media files like video.
-    $file->setMimeType('application/octet-stream');
+    // update the parent file if a MIME type hasn't been provided. This matters
+    // for large media files like video.
+    $mime_type = idx($params, 'mime-type');
+    if (!strlen($mime_type)) {
+      $file->setMimeType('application/octet-stream');
+    }
 
     $chunked_hash = idx($params, 'chunkedHash');
 
@@ -399,7 +428,7 @@ final class PhabricatorFile extends PhabricatorFileDAO
     try {
       $file->updateDimensions(false);
     } catch (Exception $ex) {
-      // Do nothing
+      // Do nothing.
     }
 
     $file->saveAndIndex();
@@ -476,12 +505,13 @@ final class PhabricatorFile extends PhabricatorFileDAO
     $this->setStorageFormat($format->getStorageFormatKey());
     $this->setStorageProperties($properties);
 
-    list($identifier, $new_handle) = $this->writeToEngine(
+    list($identifier, $new_handle, $integrity_hash) = $this->writeToEngine(
       $engine,
       $data,
       $params);
 
     $this->setStorageHandle($new_handle);
+    $this->setIntegrityHash($integrity_hash);
     $this->save();
 
     $this->deleteFileDataIfUnused(
@@ -632,10 +662,17 @@ final class PhabricatorFile extends PhabricatorFileDAO
           // just bail out.
           throw $status;
         } else {
-          // This is HTTP 2XX, so use the response body to save the
-          // file data.
+          // This is HTTP 2XX, so use the response body to save the file data.
+          // Provide a default name based on the URI, truncating it if the URI
+          // is exceptionally long.
+
+          $default_name = basename($uri);
+          $default_name = id(new PhutilUTF8StringTruncator())
+            ->setMaximumBytes(64)
+            ->truncateString($default_name);
+
           $params = $params + array(
-            'name' => basename($uri),
+            'name' => $default_name,
           );
 
           return self::newFromFileData($body, $params);
@@ -794,16 +831,24 @@ final class PhabricatorFile extends PhabricatorFileDAO
         pht('You must save a file before you can generate a view URI.'));
     }
 
-    return $this->getCDNURI();
+    return $this->getCDNURI('data');
   }
 
-  public function getCDNURI() {
+  public function getCDNURI($request_kind) {
+    if (($request_kind !== 'data') &&
+        ($request_kind !== 'download')) {
+      throw new Exception(
+        pht(
+          'Unknown file content request kind "%s".',
+          $request_kind));
+    }
+
     $name = self::normalizeFileName($this->getName());
     $name = phutil_escape_uri($name);
 
     $parts = array();
     $parts[] = 'file';
-    $parts[] = 'data';
+    $parts[] = $request_kind;
 
     // If this is an instanced install, add the instance identifier to the URI.
     // Instanced configurations behind a CDN may not be able to control the
@@ -845,9 +890,7 @@ final class PhabricatorFile extends PhabricatorFileDAO
   }
 
   public function getDownloadURI() {
-    $uri = id(new PhutilURI($this->getViewURI()))
-      ->setQueryParam('download', true);
-    return (string)$uri;
+    return $this->getCDNURI('download');
   }
 
   public function getURIForTransform(PhabricatorFileTransform $transform) {
@@ -904,6 +947,19 @@ final class PhabricatorFile extends PhabricatorFileDAO
     }
 
     $mime_map = PhabricatorEnv::getEnvConfig('files.video-mime-types');
+    $mime_type = $this->getMimeType();
+    return idx($mime_map, $mime_type);
+  }
+
+  public function isPDF() {
+    if (!$this->isViewableInBrowser()) {
+      return false;
+    }
+
+    $mime_map = array(
+      'application/pdf' => 'application/pdf',
+    );
+
     $mime_type = $this->getMimeType();
     return idx($mime_map, $mime_type);
   }
@@ -1046,9 +1102,20 @@ final class PhabricatorFile extends PhabricatorFileDAO
       throw new Exception(pht('Cannot retrieve image information.'));
     }
 
+    if ($this->getIsChunk()) {
+      throw new Exception(
+        pht('Refusing to assess image dimensions of file chunk.'));
+    }
+
+    $engine = $this->instantiateStorageEngine();
+    if ($engine->isChunkEngine()) {
+      throw new Exception(
+        pht('Refusing to assess image dimensions of chunked file.'));
+    }
+
     $data = $this->loadFileData();
 
-    $img = imagecreatefromstring($data);
+    $img = @imagecreatefromstring($data);
     if ($img === false) {
       throw new Exception(pht('Error when decoding image.'));
     }
@@ -1119,7 +1186,6 @@ final class PhabricatorFile extends PhabricatorFileDAO
 
       $params = array(
         'name' => $builtin->getBuiltinDisplayName(),
-        'ttl.relative' => phutil_units('7 days in seconds'),
         'canCDN' => true,
         'builtin' => $key,
       );
@@ -1209,6 +1275,72 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return idx($this->metadata, self::METADATA_IMAGE_WIDTH);
   }
 
+  public function getAltText() {
+    $alt = $this->getCustomAltText();
+
+    if (strlen($alt)) {
+      return $alt;
+    }
+
+    return $this->getDefaultAltText();
+  }
+
+  public function getCustomAltText() {
+    return idx($this->metadata, self::METADATA_ALT_TEXT);
+  }
+
+  public function setCustomAltText($value) {
+    $value = phutil_string_cast($value);
+
+    if (!strlen($value)) {
+      $value = null;
+    }
+
+    if ($value === null) {
+      unset($this->metadata[self::METADATA_ALT_TEXT]);
+    } else {
+      $this->metadata[self::METADATA_ALT_TEXT] = $value;
+    }
+
+    return $this;
+  }
+
+  public function getDefaultAltText() {
+    $parts = array();
+
+    $name = $this->getName();
+    if (strlen($name)) {
+      $parts[] = $name;
+    }
+
+    $stats = array();
+
+    $image_x = $this->getImageHeight();
+    $image_y = $this->getImageWidth();
+
+    if ($image_x && $image_y) {
+      $stats[] = pht(
+        "%d\xC3\x97%d px",
+        new PhutilNumber($image_x),
+        new PhutilNumber($image_y));
+    }
+
+    $bytes = $this->getByteSize();
+    if ($bytes) {
+      $stats[] = phutil_format_bytes($bytes);
+    }
+
+    if ($stats) {
+      $parts[] = pht('(%s)', implode(', ', $stats));
+    }
+
+    if (!$parts) {
+      return null;
+    }
+
+    return implode(' ', $parts);
+  }
+
   public function getCanCDN() {
     if (!$this->isViewableImage()) {
       return false;
@@ -1244,6 +1376,15 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return $this;
   }
 
+  public function getIsChunk() {
+    return idx($this->metadata, self::METADATA_CHUNK);
+  }
+
+  public function setIsChunk($value) {
+    $this->metadata[self::METADATA_CHUNK] = $value;
+    return $this;
+  }
+
   public function setIntegrityHash($integrity_hash) {
     $this->metadata[self::METADATA_INTEGRITY] = $integrity_hash;
     return $this;
@@ -1275,28 +1416,25 @@ final class PhabricatorFile extends PhabricatorFileDAO
    * @return this
    */
   public function attachToObject($phid) {
-    $edge_type = PhabricatorObjectHasFileEdgeType::EDGECONST;
+    $attachment_table = new PhabricatorFileAttachment();
+    $attachment_conn = $attachment_table->establishConnection('w');
 
-    id(new PhabricatorEdgeEditor())
-      ->addEdge($phid, $edge_type, $this->getPHID())
-      ->save();
-
-    return $this;
-  }
-
-
-  /**
-   * Remove the policy edge between this file and some object.
-   *
-   * @param phid Object PHID to detach from.
-   * @return this
-   */
-  public function detachFromObject($phid) {
-    $edge_type = PhabricatorObjectHasFileEdgeType::EDGECONST;
-
-    id(new PhabricatorEdgeEditor())
-      ->removeEdge($phid, $edge_type, $this->getPHID())
-      ->save();
+    queryfx(
+      $attachment_conn,
+      'INSERT INTO %R (objectPHID, filePHID, attachmentMode,
+          attacherPHID, dateCreated, dateModified)
+        VALUES (%s, %s, %s, %ns, %d, %d)
+        ON DUPLICATE KEY UPDATE
+          attachmentMode = VALUES(attachmentMode),
+          attacherPHID = VALUES(attacherPHID),
+          dateModified = VALUES(dateModified)',
+      $attachment_table,
+      $phid,
+      $this->getPHID(),
+      PhabricatorFileAttachment::MODE_ATTACH,
+      null,
+      PhabricatorTime::getNow(),
+      PhabricatorTime::getNow());
 
     return $this;
   }
@@ -1328,6 +1466,7 @@ final class PhabricatorFile extends PhabricatorFileDAO
         'mime-type' => 'optional string',
         'builtin' => 'optional string',
         'storageEngines' => 'optional list<PhabricatorFileStorageEngine>',
+        'chunk' => 'optional bool',
       ));
 
     $file_name = idx($params, 'name');
@@ -1405,6 +1544,11 @@ final class PhabricatorFile extends PhabricatorFileDAO
       $this->setMimeType($mime_type);
     }
 
+    $is_chunk = idx($params, 'chunk');
+    if ($is_chunk) {
+      $this->setIsChunk(true);
+    }
+
     return $this;
   }
 
@@ -1425,6 +1569,16 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return id(new AphrontRedirectResponse())
       ->setIsExternal($is_external)
       ->setURI($uri);
+  }
+
+  public function newDownloadResponse() {
+    // We're cheating a little bit here and relying on the fact that
+    // getDownloadURI() always returns a fully qualified URI with a complete
+    // domain.
+    return id(new AphrontRedirectResponse())
+      ->setIsExternal(true)
+      ->setCloseDialogBeforeRedirect(true)
+      ->setURI($this->getDownloadURI());
   }
 
   public function attachTransforms(array $map) {
@@ -1454,19 +1608,8 @@ final class PhabricatorFile extends PhabricatorFileDAO
     return new PhabricatorFileEditor();
   }
 
-  public function getApplicationTransactionObject() {
-    return $this;
-  }
-
   public function getApplicationTransactionTemplate() {
     return new PhabricatorFileTransaction();
-  }
-
-  public function willRenderTimeline(
-    PhabricatorApplicationTransactionView $timeline,
-    AphrontRequest $request) {
-
-    return $timeline;
   }
 
 
@@ -1577,8 +1720,12 @@ final class PhabricatorFile extends PhabricatorFileDAO
         ->setType('string')
         ->setDescription(pht('The name of the file.')),
       id(new PhabricatorConduitSearchFieldSpecification())
+        ->setKey('uri')
+        ->setType('uri')
+        ->setDescription(pht('View URI for the file.')),
+      id(new PhabricatorConduitSearchFieldSpecification())
         ->setKey('dataURI')
-        ->setType('string')
+        ->setType('uri')
         ->setDescription(pht('Download URI for the file data.')),
       id(new PhabricatorConduitSearchFieldSpecification())
         ->setKey('size')
@@ -1590,8 +1737,13 @@ final class PhabricatorFile extends PhabricatorFileDAO
   public function getFieldValuesForConduit() {
     return array(
       'name' => $this->getName(),
-      'dataURI' => $this->getCDNURI(),
+      'uri' => PhabricatorEnv::getURI($this->getURI()),
+      'dataURI' => $this->getCDNURI('data'),
       'size' => (int)$this->getByteSize(),
+      'alt' => array(
+        'custom' => $this->getCustomAltText(),
+        'default' => $this->getDefaultAltText(),
+      ),
     );
   }
 

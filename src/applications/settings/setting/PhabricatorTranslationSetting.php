@@ -10,7 +10,7 @@ final class PhabricatorTranslationSetting
   }
 
   public function getSettingPanelKey() {
-    return PhabricatorAccountSettingsPanel::PANELKEY;
+    return PhabricatorLanguageSettingsPanel::PANELKEY;
   }
 
   protected function getSettingOrder() {
@@ -23,7 +23,7 @@ final class PhabricatorTranslationSetting
 
   protected function getControlInstructions() {
     return pht(
-      'Choose which language you would like the Phabricator UI to use.');
+      'Choose which language you would like the UI to use.');
   }
 
   public function assertValidValue($value) {

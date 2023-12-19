@@ -21,8 +21,10 @@ final class PhameBlogEditor
 
   public function getTransactionTypes() {
     $types = parent::getTransactionTypes();
+
     $types[] = PhabricatorTransactions::TYPE_VIEW_POLICY;
     $types[] = PhabricatorTransactions::TYPE_EDIT_POLICY;
+    $types[] = PhabricatorTransactions::TYPE_INTERACT_POLICY;
 
     return $types;
   }
@@ -48,12 +50,10 @@ final class PhameBlogEditor
   }
 
   protected function buildMailTemplate(PhabricatorLiskDAO $object) {
-    $phid = $object->getPHID();
     $name = $object->getName();
 
     return id(new PhabricatorMetaMTAMail())
-      ->setSubject($name)
-      ->addHeader('Thread-Topic', $phid);
+      ->setSubject($name);
   }
 
   protected function buildReplyHandler(PhabricatorLiskDAO $object) {

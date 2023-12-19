@@ -17,27 +17,26 @@ final class PhabricatorPeopleEmpowerController
 
     $done_uri = $this->getApplicationURI("manage/{$id}/");
 
-    id(new PhabricatorAuthSessionEngine())->requireHighSecuritySession(
-      $viewer,
-      $request,
-      $done_uri);
+    $validation_exception = null;
+    if ($request->isFormOrHisecPost()) {
+      $xactions = array();
+      $xactions[] = id(new PhabricatorUserTransaction())
+        ->setTransactionType(
+          PhabricatorUserEmpowerTransaction::TRANSACTIONTYPE)
+        ->setNewValue(!$user->getIsAdmin());
 
-    if ($user->getPHID() == $viewer->getPHID()) {
-      return $this->newDialog()
-        ->setTitle(pht('Your Way is Blocked'))
-        ->appendParagraph(
-          pht(
-            'After a time, your efforts fail. You can not adjust your own '.
-            'status as an administrator.'))
-        ->addCancelButton($done_uri, pht('Accept Fate'));
-    }
-
-    if ($request->isFormPost()) {
-      id(new PhabricatorUserEditor())
+      $editor = id(new PhabricatorUserTransactionEditor())
         ->setActor($viewer)
-        ->makeAdminUser($user, !$user->getIsAdmin());
+        ->setContentSourceFromRequest($request)
+        ->setContinueOnMissingFields(true)
+        ->setCancelURI($done_uri);
 
-      return id(new AphrontRedirectResponse())->setURI($done_uri);
+      try {
+        $editor->applyTransactions($user, $xactions);
+        return id(new AphrontRedirectResponse())->setURI($done_uri);
+      } catch (PhabricatorApplicationTransactionValidationException $ex) {
+        $validation_exception = $ex;
+      }
     }
 
     if ($user->getIsAdmin()) {
@@ -45,7 +44,7 @@ final class PhabricatorPeopleEmpowerController
       $short = pht('Remove Administrator');
       $body = pht(
         'Remove %s as an administrator? They will no longer be able to '.
-        'perform administrative functions on this Phabricator install.',
+        'perform administrative functions on this server.',
         phutil_tag('strong', array(), $user->getUsername()));
       $submit = pht('Remove Administrator');
     } else {
@@ -54,12 +53,13 @@ final class PhabricatorPeopleEmpowerController
       $body = pht(
         'Empower %s as an administrator? They will be able to create users, '.
         'approve users, make and remove administrators, delete accounts, and '.
-        'perform other administrative functions on this Phabricator install.',
+        'perform other administrative functions on this server.',
         phutil_tag('strong', array(), $user->getUsername()));
       $submit = pht('Make Administrator');
     }
 
     return $this->newDialog()
+      ->setValidationException($validation_exception)
       ->setTitle($title)
       ->setShortTitle($short)
       ->appendParagraph($body)

@@ -28,7 +28,10 @@ abstract class DiffusionRequest extends Phobject {
   private $branchObject = false;
   private $refAlternatives;
 
-  abstract public function supportsBranches();
+  final public function supportsBranches() {
+    return $this->getRepository()->supportsRefs();
+  }
+
   abstract protected function isStableCommit($symbol);
 
   protected function didInitialize() {
@@ -122,7 +125,7 @@ abstract class DiffusionRequest extends Phobject {
    *
    * @task new
    */
-  final private function __construct() {
+  private function __construct() {
     // <private>
   }
 
@@ -135,7 +138,7 @@ abstract class DiffusionRequest extends Phobject {
    * @return  DiffusionRequest    New request object.
    * @task new
    */
-  final private static function newFromIdentifier(
+  private static function newFromIdentifier(
     $identifier,
     PhabricatorUser $viewer,
     $need_edit = false) {
@@ -171,7 +174,7 @@ abstract class DiffusionRequest extends Phobject {
    * @return  DiffusionRequest        New request object.
    * @task new
    */
-  final private static function newFromRepository(
+  private static function newFromRepository(
     PhabricatorRepository $repository) {
 
     $map = array(
@@ -202,9 +205,9 @@ abstract class DiffusionRequest extends Phobject {
    * @return void
    * @task new
    */
-  final private function initializeFromDictionary(array $data) {
+  private function initializeFromDictionary(array $data) {
     $blob = idx($data, 'blob');
-    if (strlen($blob)) {
+    if (phutil_nonempty_string($blob)) {
       $blob = self::parseRequestBlob($blob, $this->supportsBranches());
       $data = $blob + $data;
     }
@@ -489,7 +492,7 @@ abstract class DiffusionRequest extends Phobject {
     // Consume the back part of the URI, up to the first "$". Use a negative
     // lookbehind to prevent matching '$$'. We double the '$' symbol when
     // encoding so that files with names like "money/$100" will survive.
-    $pattern = '@(?:(?:^|[^$])(?:[$][$])*)[$]([\d-,]+)$@';
+    $pattern = '@(?:(?:^|[^$])(?:[$][$])*)[$]([\d,-]+)$@';
     if (preg_match($pattern, $blob, $matches)) {
       $result['line'] = $matches[1];
       $blob = substr($blob, 0, -(strlen($matches[1]) + 1));
@@ -515,12 +518,14 @@ abstract class DiffusionRequest extends Phobject {
       $result['path'] = $blob;
     }
 
-    $parts = explode('/', $result['path']);
-    foreach ($parts as $part) {
-      // Prevent any hyjinx since we're ultimately shipping this to the
-      // filesystem under a lot of workflows.
-      if ($part == '..') {
-        throw new Exception(pht('Invalid path URI.'));
+    if ($result['path'] !== null) {
+      $parts = explode('/', $result['path']);
+      foreach ($parts as $part) {
+        // Prevent any hyjinx since we're ultimately shipping this to the
+        // filesystem under a lot of workflows.
+        if ($part == '..') {
+          throw new Exception(pht('Invalid path URI.'));
+        }
       }
     }
 
@@ -558,7 +563,7 @@ abstract class DiffusionRequest extends Phobject {
     throw new DiffusionSetupException(
       pht(
         'The working copy for this repository ("%s") has not been cloned yet '.
-        'on this machine ("%s"). Make sure you havestarted the Phabricator '.
+        'on this machine ("%s"). Make sure you have started the '.
         'daemons. If this problem persists for longer than a clone should '.
         'take, check the daemon logs (in the Daemon Console) to see if there '.
         'were errors cloning the repository. Consult the "Diffusion User '.

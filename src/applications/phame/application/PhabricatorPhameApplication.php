@@ -6,10 +6,6 @@ final class PhabricatorPhameApplication extends PhabricatorApplication {
     return pht('Phame');
   }
 
-  public function getMenuName() {
-    return pht('Blogs');
-  }
-
   public function getBaseURI() {
     return '/phame/';
   }
@@ -53,7 +49,6 @@ final class PhabricatorPhameApplication extends PhabricatorApplication {
           'view/(?P<id>\d+)/(?:(?P<slug>[^/]+)/)?' => 'PhamePostViewController',
           '(?P<action>publish|unpublish)/(?P<id>\d+)/'
             => 'PhamePostPublishController',
-          'preview/(?P<id>\d+)/' => 'PhamePostPreviewController',
           'preview/' => 'PhabricatorMarkupPreviewController',
           'move/(?P<id>\d+)/' => 'PhamePostMoveController',
           'archive/(?P<id>\d+)/' => 'PhamePostArchiveController',
@@ -70,25 +65,16 @@ final class PhabricatorPhameApplication extends PhabricatorApplication {
           'picture/(?P<id>[1-9]\d*)/' => 'PhameBlogProfilePictureController',
           'header/(?P<id>[1-9]\d*)/' => 'PhameBlogHeaderPictureController',
         ),
-      ) + $this->getResourceSubroutes(),
-    );
-  }
-
-  public function getResourceRoutes() {
-    return array(
-      '/phame/' => $this->getResourceSubroutes(),
-    );
-  }
-
-  private function getResourceSubroutes() {
-    return array(
-      'r/(?P<id>\d+)/(?P<hash>[^/]+)/(?P<name>.*)' =>
-        'PhameResourceController',
+      ),
     );
   }
 
   public function getBlogRoutes() {
-    return $this->getLiveRoutes();
+    return $this->getLiveRoutes() + array(
+      '/status/' => 'PhabricatorStatusController',
+      '/favicon.ico' => 'PhabricatorFaviconController',
+      '/robots.txt' => 'PhabricatorRobotsBlogController',
+    );
   }
 
   private function getLiveRoutes() {

@@ -18,6 +18,8 @@ final class HeraldTranscript extends HeraldDAO
   protected $dryRun;
   protected $garbageCollected = 0;
 
+  private $object = self::ATTACHABLE;
+
   const TABLE_SAVED_HEADER = 'herald_savedheader';
 
   public function getXHeraldRulesHeader() {
@@ -64,6 +66,10 @@ final class HeraldTranscript extends HeraldDAO
   }
 
   private static function combineXHeraldRulesHeaders($u, $v) {
+    if ($u === null) {
+      return $v;
+    }
+
     $u = preg_split('/[, ]+/', $u);
     $v = preg_split('/[, ]+/', $v);
 
@@ -192,6 +198,15 @@ final class HeraldTranscript extends HeraldDAO
   public function generatePHID() {
     return PhabricatorPHID::generateNewPHID(
       HeraldTranscriptPHIDType::TYPECONST);
+  }
+
+  public function attachObject($object = null) {
+    $this->object = $object;
+    return $this;
+  }
+
+  public function getObject() {
+    return $this->assertAttached($this->object);
   }
 
 /* -(  PhabricatorPolicyInterface  )----------------------------------------- */

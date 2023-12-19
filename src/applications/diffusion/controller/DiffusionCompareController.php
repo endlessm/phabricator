@@ -285,7 +285,6 @@ final class DiffusionCompareController extends DiffusionController {
     $request = $this->getRequest();
     $viewer = $this->getViewer();
     $drequest = $this->getDiffusionRequest();
-    $repository = $drequest->getRepository();
 
     if (!$history) {
       return $this->renderStatusMessage(
@@ -296,28 +295,15 @@ final class DiffusionCompareController extends DiffusionController {
           phutil_tag('strong', array(), $against_ref)));
     }
 
-    $history_table = id(new DiffusionHistoryTableView())
-      ->setUser($viewer)
+    $history_view = id(new DiffusionCommitGraphView())
+      ->setViewer($viewer)
       ->setDiffusionRequest($drequest)
-      ->setHistory($history);
-
-    $history_table->loadRevisions();
-
-    $history_table
+      ->setHistory($history)
       ->setParents($results['parents'])
       ->setFilterParents(true)
       ->setIsHead(!$pager->getOffset())
       ->setIsTail(!$pager->getHasMorePages());
 
-    $header = id(new PHUIHeaderView())
-      ->setHeader(pht('Commits'));
-
-    return id(new PHUIObjectBoxView())
-      ->setHeader($header)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->setTable($history_table)
-      ->addClass('diffusion-mobile-view')
-      ->setPager($pager);
-
+    return $history_view;
   }
 }

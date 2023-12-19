@@ -7,7 +7,7 @@ abstract class PhabricatorRepositoryManagementWorkflow
     $identifiers = $args->getArg($param);
 
     if (!$identifiers) {
-      return null;
+      return array();
     }
 
     $query = id(new PhabricatorRepositoryQuery())
@@ -35,10 +35,15 @@ abstract class PhabricatorRepositoryManagementWorkflow
 
   protected function loadLocalRepositories(
     PhutilArgumentParser $args,
-    $param) {
+    $param,
+    $ignore_locality = false) {
 
     $repositories = $this->loadRepositories($args, $param);
     if (!$repositories) {
+      return $repositories;
+    }
+
+    if ($ignore_locality) {
       return $repositories;
     }
 

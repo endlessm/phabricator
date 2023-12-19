@@ -35,29 +35,65 @@ final class DiffusionBrowseQueryConduitAPIMethod
   protected function getGitResult(ConduitAPIRequest $request) {
     $drequest = $this->getDiffusionRequest();
     $repository = $drequest->getRepository();
+
     $path = $request->getValue('path');
+    if (!strlen($path) || $path === '/') {
+      $path = null;
+    }
+
     $commit = $request->getValue('commit');
     $offset = (int)$request->getValue('offset');
     $limit = (int)$request->getValue('limit');
     $result = $this->getEmptyResultSet();
 
-    if ($path == '') {
+    if ($path === null) {
       // Fast path to improve the performance of the repository view; we know
       // the root is always a tree at any commit and always exists.
-      $stdout = 'tree';
+      $path_type = 'tree';
     } else {
       try {
         list($stdout) = $repository->execxLocalCommand(
-          'cat-file -t %s:%s',
-          $commit,
-          $path);
+          'cat-file -t -- %s',
+          sprintf('%s:%s', $commit, $path));
+        $path_type = trim($stdout);
       } catch (CommandException $e) {
+        // The "cat-file" command may fail if the path legitimately does not
+        // exist, but it may also fail if the path is a submodule. This can
+        // produce either "Not a valid object name" or "could not get object
+        // info".
+
+        // To detect if we have a submodule, use `git ls-tree`. If the path
+        // is a submodule, we'll get a "160000" mode mask with type "commit".
+
+        list($sub_err, $sub_stdout) = $repository->execLocalCommand(
+          'ls-tree %s -- %s',
+          gitsprintf('%s', $commit),
+          $path);
+        if (!$sub_err) {
+          // If the path failed "cat-file" but "ls-tree" worked, we assume it
+          // must be a submodule. If it is, the output will look something
+          // like this:
+          //
+          //   160000 commit <hash> <path>
+          //
+          // We make sure it has the 160000 mode mask to confirm that it's
+          // definitely a submodule.
+          $mode = (int)$sub_stdout;
+          if ($mode & 160000) {
+            $submodule_reason = DiffusionBrowseResultSet::REASON_IS_SUBMODULE;
+            $result
+              ->setReasonForEmptyResultSet($submodule_reason);
+            return $result;
+          }
+        }
+
         $stderr = $e->getStderr();
         if (preg_match('/^fatal: Not a valid object name/', $stderr)) {
           // Grab two logs, since the first one is when the object was deleted.
           list($stdout) = $repository->execxLocalCommand(
-            'log -n2 --format="%%H" %s -- %s',
-            $commit,
+            'log -n2 %s %s -- %s',
+            '--format=%H',
+            gitsprintf('%s', $commit),
             $path);
           $stdout = trim($stdout);
           if ($stdout) {
@@ -79,7 +115,7 @@ final class DiffusionBrowseQueryConduitAPIMethod
       }
     }
 
-    if (trim($stdout) == 'blob') {
+    if ($path_type === 'blob') {
       $result->setReasonForEmptyResultSet(
         DiffusionBrowseResultSet::REASON_IS_FILE);
       return $result;
@@ -90,18 +126,24 @@ final class DiffusionBrowseQueryConduitAPIMethod
       return $result;
     }
 
-    list($stdout) = $repository->execxLocalCommand(
-      'ls-tree -z -l %s:%s',
-      $commit,
-      $path);
+    if ($path === null) {
+      list($stdout) = $repository->execxLocalCommand(
+        'ls-tree -z -l %s --',
+        gitsprintf('%s', $commit));
+    } else {
+      if ($path_type === 'tree') {
+        $path = rtrim($path, '/').'/';
+      } else {
+        $path = rtrim($path, '/');
+      }
+
+      list($stdout) = $repository->execxLocalCommand(
+        'ls-tree -z -l %s -- %s',
+        gitsprintf('%s', $commit),
+        $path);
+    }
 
     $submodules = array();
-
-    if (strlen($path)) {
-      $prefix = rtrim($path, '/').'/';
-    } else {
-      $prefix = '';
-    }
 
     $count = 0;
     $results = array();
@@ -125,7 +167,7 @@ final class DiffusionBrowseQueryConduitAPIMethod
             $line));
       }
 
-      list($mode, $type, $hash, $size, $name) = $parts;
+      list($mode, $type, $hash, $size, $full_path) = $parts;
 
       $path_result = new DiffusionRepositoryPath();
 
@@ -143,8 +185,14 @@ final class DiffusionBrowseQueryConduitAPIMethod
         }
       }
 
-      $path_result->setFullPath($prefix.$name);
-      $path_result->setPath($name);
+      if ($path === null) {
+        $local_path = $full_path;
+      } else {
+        $local_path = basename($full_path);
+      }
+
+      $path_result->setFullPath($full_path);
+      $path_result->setPath($local_path);
       $path_result->setHash($hash);
       $path_result->setFileType($file_type);
       $path_result->setFileSize($size);
@@ -177,15 +225,23 @@ final class DiffusionBrowseQueryConduitAPIMethod
       // the wild.
 
       list($err, $contents) = $repository->execLocalCommand(
-        'cat-file blob %s:.gitmodules',
+        'cat-file blob -- %s:.gitmodules',
         $commit);
 
       if (!$err) {
-        $tmp = new TempFile();
-        Filesystem::writeFile($tmp, $contents);
-        list($module_info) = $repository->execxLocalCommand(
-          'config -l -f %s',
-          $tmp);
+
+        // NOTE: After T13673, the user executing "git" may not be the same
+        // as the user this process is running as (usually the webserver user),
+        // so we can't reliably use a temporary file: the daemon user may not
+        // be able to use it.
+
+        // Use "--file -" to read from stdin instead. If this fails in some
+        // older versions of Git, we could exempt this particular command from
+        // sudoing to the daemon user.
+
+        $future = $repository->getLocalCommandFuture('config -l --file - --');
+        $future->write($contents);
+        list($module_info) = $future->resolvex();
 
         $dict = array();
         $lines = explode("\n", trim($module_info));
@@ -195,11 +251,11 @@ final class DiffusionBrowseQueryConduitAPIMethod
           $dict[$key] = $value;
         }
 
-        foreach ($submodules as $path) {
-          $full_path = $path->getFullPath();
+        foreach ($submodules as $submodule_path) {
+          $full_path = $submodule_path->getFullPath();
           $key = 'submodule.'.$full_path.'.url';
           if (isset($dict[$key])) {
-            $path->setExternalURI($dict[$key]);
+            $submodule_path->setExternalURI($dict[$key]);
           }
         }
       }
@@ -338,9 +394,9 @@ final class DiffusionBrowseQueryConduitAPIMethod
     }
 
     if ($commit) {
-      $slice_clause = 'AND svnCommit <= '.(int)$commit;
+      $slice_clause = qsprintf($conn_r, 'AND svnCommit <= %d', $commit);
     } else {
-      $slice_clause = '';
+      $slice_clause = qsprintf($conn_r, '');
     }
 
     $index = queryfx_all(
@@ -409,9 +465,11 @@ final class DiffusionBrowseQueryConduitAPIMethod
 
     $sql = array();
     foreach ($index as $row) {
-      $sql[] =
-        '(pathID = '.(int)$row['pathID'].' AND '.
-        'svnCommit = '.(int)$row['maxCommit'].')';
+      $sql[] = qsprintf(
+        $conn_r,
+        '(pathID = %d AND svnCommit = %d)',
+        $row['pathID'],
+        $row['maxCommit']);
     }
 
     $browse = queryfx_all(
@@ -421,13 +479,13 @@ final class DiffusionBrowseQueryConduitAPIMethod
         WHERE repositoryID = %d
           AND parentID = %d
           AND existed = 1
-        AND (%Q)
+        AND (%LO)
         ORDER BY pathName',
       PhabricatorRepository::TABLE_FILESYSTEM,
       PhabricatorRepository::TABLE_PATH,
       $repository->getID(),
       $path_id,
-      implode(' OR ', $sql));
+      $sql);
 
     $loadable_commits = array();
     foreach ($browse as $key => $file) {

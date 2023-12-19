@@ -60,7 +60,7 @@ abstract class PhabricatorSearchEngineAPIMethod
       PhabricatorEnv::getDoclink('Conduit API: Using Search Endpoints'));
   }
 
-  final public function getMethodDocumentation() {
+  final protected function newDocumentationPages(PhabricatorUser $viewer) {
     $viewer = $this->getViewer();
 
     $engine = $this->newSearchEngine()
@@ -70,17 +70,18 @@ abstract class PhabricatorSearchEngineAPIMethod
 
     $out = array();
 
-    $out[] = $this->buildQueriesBox($engine);
-    $out[] = $this->buildConstraintsBox($engine);
-    $out[] = $this->buildOrderBox($engine, $query);
-    $out[] = $this->buildFieldsBox($engine);
-    $out[] = $this->buildAttachmentsBox($engine);
-    $out[] = $this->buildPagingBox($engine);
+    $out[] = $this->buildQueriesDocumentationPage($viewer, $engine);
+    $out[] = $this->buildConstraintsDocumentationPage($viewer, $engine);
+    $out[] = $this->buildOrderDocumentationPage($viewer, $engine, $query);
+    $out[] = $this->buildFieldsDocumentationPage($viewer, $engine);
+    $out[] = $this->buildAttachmentsDocumentationPage($viewer, $engine);
+    $out[] = $this->buildPagingDocumentationPage($viewer, $engine);
 
     return $out;
   }
 
-  private function buildQueriesBox(
+  private function buildQueriesDocumentationPage(
+    PhabricatorUser $viewer,
     PhabricatorApplicationSearchEngine $engine) {
     $viewer = $this->getViewer();
 
@@ -140,15 +141,18 @@ EOTEXT
           null,
         ));
 
-    return id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Builtin and Saved Queries'))
-      ->setCollapsed(true)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($this->buildRemarkup($info))
-      ->appendChild($table);
+    $title = pht('Prebuilt Queries');
+    $content = array(
+      $this->newRemarkupDocumentationView($info),
+      $table,
+    );
+
+    return $this->newDocumentationBoxPage($viewer, $title, $content)
+      ->setAnchor('queries');
   }
 
-  private function buildConstraintsBox(
+  private function buildConstraintsDocumentationPage(
+    PhabricatorUser $viewer,
     PhabricatorApplicationSearchEngine $engine) {
 
     $info = pht(<<<EOTEXT
@@ -161,14 +165,16 @@ If you specify both a `queryKey` and `constraints`, the builtin or saved query
 will be applied first as a starting point, then any additional values in
 `constraints` will be applied, overwriting the defaults from the original query.
 
-Specify constraints like this:
+Different endpoints support different constraints. The constraints this method
+supports are detailed below. As an example, you might specify constraints like
+this:
 
 ```lang=json, name="Example Custom Constraints"
 {
   ...
   "constraints": {
-    "authors": ["PHID-USER-1111", "PHID-USER-2222"],
-    "statuses": ["open", "closed"],
+    "authorPHIDs": ["PHID-USER-1111", "PHID-USER-2222"],
+    "flavors": ["cherry", "orange"],
     ...
   },
   ...
@@ -188,15 +194,28 @@ EOTEXT
       $fields,
       array('ids', 'phids')) + $fields;
 
+    $constant_lists = array();
+
     $rows = array();
     foreach ($fields as $field) {
       $key = $field->getConduitKey();
       $label = $field->getLabel();
 
+      $constants = $field->newConduitConstants();
+      $show_table = false;
+
       $type_object = $field->getConduitParameterType();
       if ($type_object) {
         $type = $type_object->getTypeName();
         $description = $field->getDescription();
+        if ($constants) {
+          $description = array(
+            $description,
+            ' ',
+            phutil_tag('em', array(), pht('(See table below.)')),
+          );
+          $show_table = true;
+        }
       } else {
         $type = null;
         $description = phutil_tag('em', array(), pht('Not supported.'));
@@ -208,6 +227,46 @@ EOTEXT
         $type,
         $description,
       );
+
+      if ($show_table) {
+        $constant_lists[] = $this->newRemarkupDocumentationView(
+          pht(
+            'Constants supported by the `%s` constraint:',
+            $key));
+
+        $constants_rows = array();
+        foreach ($constants as $constant) {
+          if ($constant->getIsDeprecated()) {
+            $icon = id(new PHUIIconView())
+              ->setIcon('fa-exclamation-triangle', 'red');
+          } else {
+            $icon = null;
+          }
+
+          $constants_rows[] = array(
+            $constant->getKey(),
+            array(
+              $icon,
+              ' ',
+              $constant->getValue(),
+            ),
+          );
+        }
+
+        $constants_table = id(new AphrontTableView($constants_rows))
+          ->setHeaders(
+            array(
+              pht('Key'),
+              pht('Value'),
+            ))
+          ->setColumnClasses(
+            array(
+              'mono',
+              'wide',
+            ));
+
+        $constant_lists[] = $constants_table;
+      }
     }
 
     $table = id(new AphrontTableView($rows))
@@ -226,15 +285,21 @@ EOTEXT
           'wide',
         ));
 
-    return id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Custom Query Constraints'))
-      ->setCollapsed(true)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($this->buildRemarkup($info))
-      ->appendChild($table);
+
+    $title = pht('Constraints');
+    $content = array(
+      $this->newRemarkupDocumentationView($info),
+      $table,
+      $constant_lists,
+    );
+
+    return $this->newDocumentationBoxPage($viewer, $title, $content)
+      ->setAnchor('constraints')
+      ->setIconIcon('fa-filter');
   }
 
-  private function buildOrderBox(
+  private function buildOrderDocumentationPage(
+    PhabricatorUser $viewer,
     PhabricatorApplicationSearchEngine $engine,
     $query) {
 
@@ -332,24 +397,27 @@ EOTEXT
           'wide',
         ));
 
+    $title = pht('Result Ordering');
+    $content = array(
+      $this->newRemarkupDocumentationView($orders_info),
+      $orders_table,
+      $this->newRemarkupDocumentationView($columns_info),
+      $columns_table,
+    );
 
-    return id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Result Ordering'))
-      ->setCollapsed(true)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($this->buildRemarkup($orders_info))
-      ->appendChild($orders_table)
-      ->appendChild($this->buildRemarkup($columns_info))
-      ->appendChild($columns_table);
+    return $this->newDocumentationBoxPage($viewer, $title, $content)
+      ->setAnchor('ordering')
+      ->setIconIcon('fa-sort-numeric-asc');
   }
 
-  private function buildFieldsBox(
+  private function buildFieldsDocumentationPage(
+    PhabricatorUser $viewer,
     PhabricatorApplicationSearchEngine $engine) {
 
     $info = pht(<<<EOTEXT
 Objects matching your query are returned as a list of dictionaries in the
 `data` property of the results. Each dictionary has some metadata and a
-`fields` key, which contains the information abou the object that most callers
+`fields` key, which contains the information about the object that most callers
 will be interested in.
 
 For example, the results may look something like this:
@@ -414,15 +482,19 @@ EOTEXT
           'wide',
         ));
 
-    return id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Object Fields'))
-      ->setCollapsed(true)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($this->buildRemarkup($info))
-      ->appendChild($table);
+    $title = pht('Object Fields');
+    $content = array(
+      $this->newRemarkupDocumentationView($info),
+      $table,
+    );
+
+    return $this->newDocumentationBoxPage($viewer, $title, $content)
+      ->setAnchor('fields')
+      ->setIconIcon('fa-cube');
   }
 
-  private function buildAttachmentsBox(
+  private function buildAttachmentsDocumentationPage(
+    PhabricatorUser $viewer,
     PhabricatorApplicationSearchEngine $engine) {
 
     $info = pht(<<<EOTEXT
@@ -504,15 +576,19 @@ EOTEXT
           'wide',
         ));
 
-    return id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Attachments'))
-      ->setCollapsed(true)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($this->buildRemarkup($info))
-      ->appendChild($table);
+    $title = pht('Attachments');
+    $content = array(
+      $this->newRemarkupDocumentationView($info),
+      $table,
+    );
+
+    return $this->newDocumentationBoxPage($viewer, $title, $content)
+      ->setAnchor('attachments')
+      ->setIconIcon('fa-cubes');
   }
 
-  private function buildPagingBox(
+  private function buildPagingDocumentationPage(
+    PhabricatorUser $viewer,
     PhabricatorApplicationSearchEngine $engine) {
 
     $info = pht(<<<EOTEXT
@@ -575,25 +651,14 @@ if `before` is `null`, there are no previous results available.
 EOTEXT
       );
 
-    return id(new PHUIObjectBoxView())
-      ->setHeaderText(pht('Paging and Limits'))
-      ->setCollapsed(true)
-      ->setBackground(PHUIObjectBoxView::BLUE_PROPERTY)
-      ->appendChild($this->buildRemarkup($info));
+    $title = pht('Paging and Limits');
+    $content = array(
+      $this->newRemarkupDocumentationView($info),
+    );
+
+    return $this->newDocumentationBoxPage($viewer, $title, $content)
+      ->setAnchor('paging')
+      ->setIconIcon('fa-clone');
   }
 
-  private function buildRemarkup($remarkup) {
-    $viewer = $this->getViewer();
-
-    $view = new PHUIRemarkupView($viewer, $remarkup);
-
-    $view->setRemarkupOptions(
-      array(
-        PHUIRemarkupView::OPTION_PRESERVE_LINEBREAKS => false,
-      ));
-
-    return id(new PHUIBoxView())
-      ->appendChild($view)
-      ->addPadding(PHUI::PADDING_LARGE);
-  }
 }

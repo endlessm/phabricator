@@ -54,14 +54,13 @@ return array(
     'javelin-behavior-aphlict-dropdown',
     'javelin-behavior-history-install',
     'javelin-behavior-phabricator-gesture',
-    'javelin-behavior-phabricator-active-nav',
-    'javelin-behavior-phabricator-nav',
     'javelin-behavior-phabricator-remarkup-assist',
     'phabricator-textareautils',
     'phabricator-file-upload',
     'javelin-behavior-global-drag-and-drop',
     'javelin-behavior-phabricator-reveal-content',
     'phui-hovercard',
+    'phui-hovercard-list',
     'javelin-behavior-phui-hovercards',
     'javelin-color',
     'javelin-fx',
@@ -88,6 +87,12 @@ return array(
     'javelin-behavior-aphlict-status',
     'javelin-behavior-user-menu',
     'phabricator-favicon',
+    'javelin-behavior-phui-tab-group',
+    'javelin-behavior-phui-submenu',
+    'phuix-button-view',
+    'javelin-behavior-comment-actions',
+    'phuix-form-control-view',
+    'phuix-autocomplete',
   ),
   'core.pkg.css' => array(
     'phabricator-core-css',
@@ -158,9 +163,14 @@ return array(
     'phabricator-feed-css',
     'phabricator-dashboard-css',
     'aphront-multi-column-view-css',
+    'phui-curtain-object-ref-view-css',
+    'phui-comment-form-css',
+    'phui-head-thing-view-css',
+
+    'conpherence-durable-column-view',
+    'phui-button-bar-css',
   ),
   'conpherence.pkg.css' => array(
-    'conpherence-durable-column-view',
     'conpherence-menu-css',
     'conpherence-color-css',
     'conpherence-message-pane-css',
@@ -187,26 +197,33 @@ return array(
     'phabricator-content-source-view-css',
     'inline-comment-summary-css',
     'phui-inline-comment-view-css',
-    'phabricator-filetree-view-css',
+    'diff-tree-view-css',
+    'phui-formation-view-css',
   ),
   'differential.pkg.js' => array(
     'phabricator-drag-and-drop-file-upload',
     'phabricator-shaped-request',
 
-    'javelin-behavior-differential-feedback-preview',
     'javelin-behavior-differential-populate',
     'javelin-behavior-differential-diff-radios',
     'javelin-behavior-aphront-drag-and-drop-textarea',
     'javelin-behavior-phabricator-object-selector',
     'javelin-behavior-repository-crossreference',
-    'javelin-behavior-load-blame',
 
-    'javelin-behavior-differential-user-select',
     'javelin-behavior-aphront-more',
 
+    'phabricator-diff-inline-content-state',
     'phabricator-diff-inline',
     'phabricator-diff-changeset',
     'phabricator-diff-changeset-list',
+    'phabricator-diff-tree-view',
+    'phabricator-diff-path-view',
+
+    'phuix-formation-view',
+    'phuix-formation-column-view',
+    'phuix-formation-flank-view',
+
+    'javelin-external-editor-link-engine',
   ),
   'diffusion.pkg.css' => array(
     'diffusion-icons-css',
@@ -221,11 +238,11 @@ return array(
   ),
   'maniphest.pkg.js' => array(
     'javelin-behavior-maniphest-batch-selector',
-    'javelin-behavior-maniphest-subpriority-editor',
     'javelin-behavior-maniphest-list-editor',
   ),
-  'darkconsole.pkg.js' => array(
+  'dark-console.pkg.js' => array(
     'javelin-behavior-dark-console',
-    'javelin-behavior-error-log',
+    'phabricator-darklog',
+    'phabricator-darkmessage',
   ),
 );

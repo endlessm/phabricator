@@ -28,6 +28,14 @@ final class PHUIObjectItemView extends AphrontTagView {
   private $sideColumn;
   private $coverImage;
   private $description;
+  private $clickable;
+  private $mapViews = array();
+  private $menu;
+
+  private $selectableName;
+  private $selectableValue;
+  private $isSelected;
+  private $isForbidden;
 
   public function setDisabled($disabled) {
     $this->disabled = $disabled;
@@ -160,8 +168,31 @@ final class PHUIObjectItemView extends AphrontTagView {
     return $this;
   }
 
+  public function setSelectable(
+    $name,
+    $value,
+    $is_selected,
+    $is_forbidden = false) {
+
+    $this->selectableName = $name;
+    $this->selectableValue = $value;
+    $this->isSelected = $is_selected;
+    $this->isForbidden = $is_forbidden;
+
+    return $this;
+  }
+
+  public function setClickable($clickable) {
+    $this->clickable = $clickable;
+    return $this;
+  }
+
+  public function getClickable() {
+    return $this->clickable;
+  }
+
   public function setEpoch($epoch) {
-    $date = phabricator_datetime($epoch, $this->getUser());
+    $date = phabricator_dual_datetime($epoch, $this->getUser());
     $this->addIcon('none', $date);
     return $this;
   }
@@ -181,6 +212,21 @@ final class PHUIObjectItemView extends AphrontTagView {
       'attributes' => $attributes,
     );
     return $this;
+  }
+
+  public function newMenuItem() {
+    if (!$this->menu) {
+      $this->menu = new FuelMenuView();
+    }
+
+    return $this->menu->newItem();
+  }
+
+  public function newMapView() {
+    $list = id(new FuelMapView())
+      ->addClass('fuel-map-property-list');
+    $this->mapViews[] = $list;
+    return $list;
   }
 
   /**
@@ -239,6 +285,8 @@ final class PHUIObjectItemView extends AphrontTagView {
   }
 
   protected function getTagAttributes() {
+    $sigils = array();
+
     $item_classes = array();
     $item_classes[] = 'phui-oi';
 
@@ -268,6 +316,8 @@ final class PHUIObjectItemView extends AphrontTagView {
 
     if ($this->disabled) {
       $item_classes[] = 'phui-oi-disabled';
+    } else {
+      $item_classes[] = 'phui-oi-enabled';
     }
 
     switch ($this->effect) {
@@ -286,8 +336,27 @@ final class PHUIObjectItemView extends AphrontTagView {
         throw new Exception(pht('Invalid effect!'));
     }
 
-    if ($this->getGrippable()) {
-      $item_classes[] = 'phui-oi-grippable';
+    if ($this->isForbidden) {
+      $item_classes[] = 'phui-oi-forbidden';
+    } else if ($this->isSelected) {
+      $item_classes[] = 'phui-oi-selected';
+    }
+
+    if ($this->selectableName !== null && !$this->isForbidden) {
+      $item_classes[] = 'phui-oi-selectable';
+      $sigils[] = 'phui-oi-selectable';
+
+      Javelin::initBehavior('phui-selectable-list');
+    }
+
+    $is_grippable = $this->getGrippable();
+    if ($is_grippable !== null) {
+      $item_classes[] = 'phui-oi-has-grip';
+      if ($is_grippable) {
+        $item_classes[] = 'phui-oi-grippable';
+      } else {
+        $item_classes[] = 'phui-oi-ungrippable';
+      }
     }
 
     if ($this->getImageURI()) {
@@ -298,8 +367,16 @@ final class PHUIObjectItemView extends AphrontTagView {
       $item_classes[] = 'phui-oi-with-image-icon';
     }
 
+    if ($this->getClickable()) {
+      Javelin::initBehavior('linked-container');
+
+      $item_classes[] = 'phui-oi-linked-container';
+      $sigils[] = 'linked-container';
+    }
+
     return array(
       'class' => $item_classes,
+      'sigil' => $sigils,
     );
   }
 
@@ -319,10 +396,11 @@ final class PHUIObjectItemView extends AphrontTagView {
 
     if ($this->objectName) {
       $header_name[] = array(
-        phutil_tag(
+        javelin_tag(
           'span',
           array(
             'class' => 'phui-oi-objname',
+            'sigil' => 'ungrabbable',
           ),
           $this->objectName),
         ' ',
@@ -362,25 +440,17 @@ final class PHUIObjectItemView extends AphrontTagView {
         ));
     }
 
-    // Wrap the header content in a <span> with the "slippery" sigil. This
-    // prevents us from beginning a drag if you click the text (like "T123"),
-    // but not if you click the white space after the header.
     $header = phutil_tag(
       'div',
       array(
         'class' => 'phui-oi-name',
       ),
-      javelin_tag(
-        'span',
-        array(
-          'sigil' => 'slippery',
-        ),
-        array(
-          $this->headIcons,
-          $header_name,
-          $header_link,
-          $description_tag,
-        )));
+      array(
+        $this->headIcons,
+        $header_name,
+        $header_link,
+        $description_tag,
+      ));
 
     $icons = array();
     if ($this->icons) {
@@ -408,15 +478,6 @@ final class PHUIObjectItemView extends AphrontTagView {
           ),
           $spec['label']);
 
-        if (isset($spec['attributes']['href'])) {
-          $icon_href = phutil_tag(
-            'a',
-            array('href' => $spec['attributes']['href']),
-            array($icon, $label));
-        } else {
-          $icon_href = array($icon, $label);
-        }
-
         $classes = array();
         $classes[] = 'phui-oi-icon';
         if (isset($spec['attributes']['class'])) {
@@ -428,7 +489,10 @@ final class PHUIObjectItemView extends AphrontTagView {
           array(
             'class' => implode(' ', $classes),
           ),
-          $icon_href);
+          array(
+            $icon,
+            $label,
+          ));
       }
 
       $icons[] = phutil_tag(
@@ -542,13 +606,27 @@ final class PHUIObjectItemView extends AphrontTagView {
     }
 
     $grippable = null;
-    if ($this->getGrippable()) {
+    if ($this->getGrippable() !== null) {
       $grippable = phutil_tag(
         'div',
         array(
           'class' => 'phui-oi-grip',
         ),
         '');
+    }
+
+    $map_views = null;
+    if ($this->mapViews) {
+      $grid = id(new FuelGridView())
+        ->addClass('fuel-grid-property-list');
+
+      $row = $grid->newRow();
+      foreach ($this->mapViews as $map_view) {
+        $row->newCell()
+          ->setContent($map_view);
+      }
+
+      $map_views = $grid;
     }
 
     $content = phutil_tag(
@@ -559,6 +637,7 @@ final class PHUIObjectItemView extends AphrontTagView {
       array(
         $subhead,
         $attrs,
+        $map_views,
         $this->renderChildren(),
       ));
 
@@ -628,6 +707,28 @@ final class PHUIObjectItemView extends AphrontTagView {
         $countdown);
     }
 
+    if ($this->selectableName !== null) {
+      if (!$this->isForbidden) {
+        $checkbox = phutil_tag(
+          'input',
+          array(
+            'type' => 'checkbox',
+            'name' => $this->selectableName,
+            'value' => $this->selectableValue,
+            'checked' => ($this->isSelected ? 'checked' : null),
+          ));
+      } else {
+        $checkbox = null;
+      }
+
+      $column0 = phutil_tag(
+        'div',
+        array(
+          'class' => 'phui-oi-col0 phui-oi-checkbox',
+        ),
+        $checkbox);
+    }
+
     $column1 = phutil_tag(
       'div',
       array(
@@ -652,8 +753,9 @@ final class PHUIObjectItemView extends AphrontTagView {
     }
 
     /* Fixed width, right column container. */
+    $column3 = null;
     if ($this->sideColumn) {
-      $column2 = phutil_tag(
+      $column3 = phutil_tag(
         'div',
         array(
           'class' => 'phui-oi-col2 phui-oi-side-column',
@@ -674,6 +776,7 @@ final class PHUIObjectItemView extends AphrontTagView {
           $column0,
           $column1,
           $column2,
+          $column3,
         )));
 
     $box = phutil_tag(
@@ -712,6 +815,23 @@ final class PHUIObjectItemView extends AphrontTagView {
         $image,
         $box,
       ));
+
+    if ($this->menu) {
+      $grid_view = id(new FuelGridView())
+        ->addClass('fuel-grid-tablet');
+      $grid_row = $grid_view->newRow();
+
+      $grid_row->newCell()
+        ->setContent($frame_content);
+
+      $menu = $this->menu;
+
+      $grid_row->newCell()
+        ->addClass('phui-oi-menu')
+        ->setContent($menu);
+
+      $frame_content = $grid_view;
+    }
 
     $frame_cover = null;
     if ($this->coverImage) {
