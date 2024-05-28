@@ -22,20 +22,6 @@ foreach ($iterator as $account_row) {
     continue;
   }
 
-  // Endless changed the Google adapter accountID to use the Google account ID
-  // from the OAuth data rather than the email address. Since d0f4554dbe, the
-  // adapter handles the Google account ID, but it uses the format "id(<id>)",
-  // which is different than the raw format used by Endless. If the accountID
-  // field doesn't look like an email address, convert it to the "id(<id>)"
-  // format.
-  //
-  // https://phabricator.endlessm.com/T29811
-  // https://phabricator.endlessm.com/T31815
-  if ($account_row['accountType'] === 'google' &&
-      !preg_match('/@/', $account_id)) {
-    $account_id = sprintf('id(%s)', $account_id);
-  }
-
   queryfx(
     $conn,
     'INSERT IGNORE INTO %R (
